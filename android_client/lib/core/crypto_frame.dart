@@ -78,28 +78,41 @@ Uint8List? decryptFrame(Uint8List frame, Uint8List key) {
   return out;
 }
 
-Future<Uint8List?> readFrame(Stream<List<int>> stream, Uint8List key) async {
-  final it = StreamIterator(stream);
-  try {
-    final head = await _readExact(it, headerLen);
-    if (head == null || head[0] != magicByte) {
-      return null;
-    }
-    final n = (head[1] << 24) | (head[2] << 16) | (head[3] << 8) | head[4];
-    if (n > maxPayload) {
-      return null;
-    }
-    final body = await _readExact(it, n + tagLen);
-    if (body == null) {
-      return null;
-    }
-    final frame = Uint8List(headerLen + body.length);
-    frame.setRange(0, headerLen, head);
-    frame.setRange(headerLen, headerLen + body.length, body);
-    return decryptFrame(frame, key);
-  } finally {
-    await it.cancel();
+typedef FrameData = ({Uint8List payload, Uint8List rest});
+
+/// Reads one encrypted frame from the shared [it], returning the decrypted
+/// [FrameData.payload] plus any [FrameData.rest] bytes that arrived in the
+/// same chunk(s) but trail the frame end.
+///
+/// Single-consumer model (mirrors `readHeaders`): the caller owns [it] and
+/// must keep consuming the same iterator afterwards — e.g. when a frame and
+/// following data arrive together, the trailing bytes are handed back via
+/// [FrameData.rest] instead of being lost (Python's `StreamReader` keeps
+/// them in its internal buffer; Dart has no such buffer).
+///
+/// Returns `null` on EOF before the frame completes, bad magic, an oversized
+/// declared length, or a tag mismatch.
+Future<FrameData?> readFrame(StreamIterator<List<int>> it, Uint8List key) async {
+  final head = await _readExact(it, headerLen);
+  if (head == null || head.length < headerLen || head[0] != magicByte) {
+    return null;
   }
+  final n = (head[1] << 24) | (head[2] << 16) | (head[3] << 8) | head[4];
+  if (n > maxPayload) {
+    return null;
+  }
+  final total = headerLen + n + tagLen;
+  final body = await _readExact(it, total - head.length);
+  if (body == null || head.length + body.length < total) {
+    return null;
+  }
+  final bytes = BytesBuilder(copy: false)..add(head)..add(body);
+  final all = bytes.takeBytes();
+  final payload = decryptFrame(all.sublist(0, total), key);
+  if (payload == null) {
+    return null;
+  }
+  return (payload: payload, rest: all.sublist(total));
 }
 
 Future<Uint8List?> _readExact(StreamIterator<List<int>> it, int n) async {
@@ -110,8 +123,7 @@ Future<Uint8List?> _readExact(StreamIterator<List<int>> it, int n) async {
     }
     buf.add(it.current);
   }
-  final bytes = buf.takeBytes();
-  return bytes.length > n ? bytes.sublist(0, n) : bytes;
+  return buf.takeBytes();
 }
 
 bool constEquals(List<int> a, List<int> b) {

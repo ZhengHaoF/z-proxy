@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -99,36 +100,55 @@ void main() {
     });
   });
 
-  group('readFrame (stream input)', () {
+  group('readFrame (shared iterator)', () {
     test('reads a frame from a split stream', () async {
       final frame = encryptFrame(utf8.encode('stream test'), key);
-      final stream = Stream<List<int>>.fromIterable([
+      final it = StreamIterator(Stream<List<int>>.fromIterable([
         frame.sublist(0, 3),
         frame.sublist(3, 21),
         frame.sublist(21),
-      ]);
-      final payload = await readFrame(stream, key);
-      expect(payload, utf8.encode('stream test'));
+      ]));
+      final data = await readFrame(it, key);
+      await it.cancel();
+      expect(data?.payload, utf8.encode('stream test'));
+      expect(data?.rest, isEmpty);
+    });
+
+    test('keeps bytes trailing the frame as rest', () async {
+      final frame = encryptFrame(utf8.encode('hello'), key);
+      final it = StreamIterator(Stream<List<int>>.fromIterable([
+        [...frame, 1, 2, 3, 4, 5],
+      ]));
+      final data = await readFrame(it, key);
+      await it.cancel();
+      expect(data?.payload, utf8.encode('hello'));
+      expect(data?.rest, [1, 2, 3, 4, 5]);
     });
 
     test('returns null on EOF before header', () async {
-      final payload = await readFrame(Stream<List<int>>.fromIterable([
+      final it = StreamIterator(Stream<List<int>>.fromIterable([
         [0x5A, 0x00],
-      ]), key);
+      ]));
+      final payload = await readFrame(it, key);
+      await it.cancel();
       expect(payload, isNull);
     });
 
     test('returns null on EOF mid-body', () async {
       final frame = encryptFrame(utf8.encode('hello world'), key);
-      final partial = frame.sublist(0, frame.length ~/ 2);
-      final payload = await readFrame(Stream<List<int>>.fromIterable([partial]), key);
+      final it = StreamIterator(
+          Stream<List<int>>.fromIterable([frame.sublist(0, frame.length ~/ 2)]));
+      final payload = await readFrame(it, key);
+      await it.cancel();
       expect(payload, isNull);
     });
 
     test('returns null on bad tag', () async {
       final frame = encryptFrame(utf8.encode('hello world'), key);
       frame[frame.length - 1] ^= 0x01;
-      final payload = await readFrame(Stream<List<int>>.fromIterable([frame]), key);
+      final it = StreamIterator(Stream<List<int>>.fromIterable([frame]));
+      final payload = await readFrame(it, key);
+      await it.cancel();
       expect(payload, isNull);
     });
   });
