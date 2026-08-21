@@ -1,0 +1,12 @@
+{
+  "client_port": 8787,
+  "server_host": "82.156.168.149",
+  "server_port": 8443,
+  "token": "54ZhengHF",
+  "mode": "all",
+  "bypass": [
+    "localhost",
+    "127.0.0.1",
+    "::1"
+  ]
+}
