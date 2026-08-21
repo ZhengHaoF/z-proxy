@@ -11,6 +11,8 @@ class RulesPage extends StatefulWidget {
 }
 
 class _RulesPageState extends State<RulesPage> {
+  Future<void> _add() => _editRule(null);
+
   Future<void> _edit(String old) => _editRule(old);
 
   Future<void> _editRule(String? original) async {
@@ -67,9 +69,17 @@ class _RulesPageState extends State<RulesPage> {
           padding: const EdgeInsets.all(16),
           child: Text(
             services.config.mode == 'all'
-                ? '当前为"全部通过"模式:所有流量(除白名单)都走隧道,规则列表不生效。'
-                : '当前为"匹配规则"模式:仅以下域名走加密隧道,其余直连。',
+                ? '当前为"代理全部流量"模式:所有流量(除白名单)都走隧道,规则列表不生效。'
+                : '当前为"按规则匹配"模式:仅以下域名走加密隧道,其余直连。',
             style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: FilledButton.icon(
+            onPressed: _add,
+            icon: const Icon(Icons.add),
+            label: const Text('添加规则'),
           ),
         ),
         Expanded(
