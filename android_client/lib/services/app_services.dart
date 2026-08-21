@@ -23,6 +23,9 @@ class AppServices extends ChangeNotifier {
 
   List<String> get logs => List.unmodifiable(_logs);
 
+  /// The local SOCKS5 proxy port (0 when the engine is not running).
+  int get socksPort => _engine == null ? 0 : _engine!.socksPort;
+
   int get secondsRunning {
     if (!vpnRunning || _startMillis == 0) {
       return 0;
@@ -92,13 +95,14 @@ class AppServices extends ChangeNotifier {
         rules: rules,
         mode: config.mode,
         bypass: config.bypass,
+        dnsServer: config.dnsServer,
       );
       engine.setRequestLogger((tag, target) {
         _addLog('[$tag] $target');
       });
       final port = await engine.serveSocks();
       _engine = engine;
-      final started = await vpn.start(port);
+      final started = await vpn.start(port, config.dnsServer);
       if (!started) {
         lastError = 'VPN 启动失败(未授权或被系统拒绝)';
         await engine.close();
@@ -126,6 +130,15 @@ class AppServices extends ChangeNotifier {
         serverPort: config.serverPort,
         token: config.token,
       );
+
+  /// Tests the local SOCKS5 proxy engine (connect through 127.0.0.1:socksPort).
+  Future<ProbeResult> testSocksProxy() async {
+    final port = socksPort;
+    if (port == 0) {
+      return (code: 'other', ok: false, msg: 'SOCKS5 代理未启动');
+    }
+    return probeSocksProxy(proxyPort: port);
+  }
 
   void clearLogs() {
     _logs.clear();

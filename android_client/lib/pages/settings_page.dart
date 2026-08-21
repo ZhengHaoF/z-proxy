@@ -18,7 +18,9 @@ class _SettingsPageState extends State<SettingsPage> {
   late final TextEditingController _port;
   late final TextEditingController _token;
   late final TextEditingController _bypass;
+  late final TextEditingController _dns;
   late String _mode;
+  bool _obscureKey = true;
 
   @override
   void initState() {
@@ -28,6 +30,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _port = TextEditingController(text: '${c.serverPort}');
     _token = TextEditingController(text: c.token);
     _bypass = TextEditingController(text: c.bypass.join(', '));
+    _dns = TextEditingController(text: c.dnsServer);
     _mode = c.mode;
   }
 
@@ -37,6 +40,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _port.dispose();
     _token.dispose();
     _bypass.dispose();
+    _dns.dispose();
     super.dispose();
   }
 
@@ -56,6 +60,7 @@ class _SettingsPageState extends State<SettingsPage> {
       token: _token.text.trim(),
       mode: _mode,
       bypass: bypass,
+      dnsServer: _dns.text.trim(),
     ));
     if (!mounted) {
       return;
@@ -78,7 +83,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 controller: _host,
                 decoration: const InputDecoration(
                   labelText: '服务端地址',
-                  helperText: '运行 zhihu-proxy 服务端的地址',
+                  helperText: '运行代理服务端的地址',
                 ),
                 validator: (v) => (v == null || v.trim().isEmpty)
                     ? '地址不能为空'
@@ -95,12 +100,22 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
               TextFormField(
                 controller: _token,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: 'Token',
-                  helperText: '与服务端 SECRET 保持一致',
+                obscureText: _obscureKey,
+                decoration: InputDecoration(
+                  labelText: 'Key',
+                  helperText: '与服务端 Key 保持一致',
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                      _obscureKey ? Icons.visibility_off : Icons.visibility,
+                    ),
+                    onPressed: () {
+                      setState(() {
+                        _obscureKey = !_obscureKey;
+                      });
+                    },
+                  ),
                 ),
-                validator: (v) => (v == null || v.isEmpty) ? 'Token 不能为空' : null,
+                validator: (v) => (v == null || v.isEmpty) ? 'Key 不能为空' : null,
               ),
               const SizedBox(height: 8),
               SegmentedButton<String>(
@@ -117,6 +132,16 @@ class _SettingsPageState extends State<SettingsPage> {
                   labelText: '直连白名单',
                   helperText: '逗号分隔;仅"代理全部流量"模式生效',
                 ),
+              ),
+              TextFormField(
+                controller: _dns,
+                decoration: const InputDecoration(
+                  labelText: 'VPN DNS 服务器',
+                  helperText: '用于 TUN 内域名解析,默认为阿里 DNS(223.5.5.5)',
+                ),
+                validator: (v) => (v == null || v.trim().isEmpty)
+                    ? 'DNS 不能为空'
+                    : null,
               ),
               const SizedBox(height: 16),
               FilledButton.icon(

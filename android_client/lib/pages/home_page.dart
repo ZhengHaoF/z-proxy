@@ -69,7 +69,13 @@ class _HomePageState extends State<HomePage> {
         OutlinedButton.icon(
           onPressed: _runConnectionTest,
           icon: const Icon(Icons.wifi_tethering),
-          label: const Text('连接测试'),
+          label: const Text('服务端连接测试'),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: _runSocksProxyTest,
+          icon: const Icon(Icons.dns),
+          label: const Text('SOCKS5 代理测试'),
         ),
         const SizedBox(height: 24),
         Text(
@@ -90,7 +96,7 @@ class _HomePageState extends State<HomePage> {
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('连接测试'),
+        title: const Text('服务端连接测试'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -103,6 +109,52 @@ class _HomePageState extends State<HomePage> {
                 )),
             const SizedBox(height: 12),
             Text(result.msg),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _runSocksProxyTest() async {
+    final services = widget.services;
+    final result = await services.testSocksProxy();
+    if (!mounted) {
+      return;
+    }
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('SOCKS5 代理测试'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              result.ok ? '✓ 代理正常' : '✗ 代理异常',
+              style: TextStyle(
+                color: result.ok
+                    ? Colors.green.shade700
+                    : Theme.of(context).colorScheme.error,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text('端口: ${services.socksPort}'),
+            const SizedBox(height: 12),
+            Text(result.msg),
+            if (!result.ok) ...[
+              const SizedBox(height: 8),
+              const Text(
+                '提示: 如果代理测试通过但 VPN 下无法上网,'
+                ' 问题在 DNS 解析或 TUN 路由,请检查 DNS 配置和日志。',
+                style: TextStyle(fontSize: 12),
+              ),
+            ],
           ],
         ),
         actions: [

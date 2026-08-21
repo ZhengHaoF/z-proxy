@@ -10,7 +10,7 @@ class AboutPage extends StatelessWidget {
       children: [
         const Icon(Icons.shield_outlined, size: 64),
         const SizedBox(height: 12),
-        const Center(child: Text('知乎代理', style: TextStyle(fontSize: 22))),
+        const Center(child: Text('代理', style: TextStyle(fontSize: 22))),
         const SizedBox(height: 4),
         Center(
           child: Text(

@@ -66,6 +66,7 @@ void main() {
       'token',
       'mode',
       'bypass',
+      'dns_server',
     ];
 
     test('serializes fields matching client/config.json structure', () {

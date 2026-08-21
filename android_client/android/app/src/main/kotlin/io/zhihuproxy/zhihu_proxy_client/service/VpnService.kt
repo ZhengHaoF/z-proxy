@@ -3,7 +3,11 @@ package io.zhihuproxy.zhihu_proxy_client.service
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.VpnService as SystemVpnService
 import android.os.Build
 import android.os.Handler
@@ -32,6 +36,7 @@ class VpnService : SystemVpnService() {
         const val ACTION_START = "io.zhihuproxy.zhihu_proxy_client.action.VPN_START"
         const val ACTION_STOP = "io.zhihuproxy.zhihu_proxy_client.action.VPN_STOP"
         const val EXTRA_SOCKS_PORT = "socks_port"
+        const val EXTRA_DNS_SERVER = "dns_server"
 
         private const val CHANNEL_ID = "vpn_channel"
         private const val NOTIFICATION_ID = 1001
@@ -39,7 +44,9 @@ class VpnService : SystemVpnService() {
         const val IPV4_ADDRESS = "172.19.0.1"
         const val IPV4_PREFIX = 30
         const val DNS_ADDRESS = "172.19.0.2"
-        const val MTU = 9000
+        // Standard Ethernet MTU: jumbo frames (9000) are unsupported by many
+        // devices/emulators and cause dropped packets behind the tunnel.
+        const val MTU = 1500
 
         @Volatile
         var isRunning = false
@@ -47,6 +54,11 @@ class VpnService : SystemVpnService() {
 
         @Volatile
         var socksPort = 0
+            private set
+
+        /** Real DNS server for the tunnel (defaults to [DNS_ADDRESS] fallback). */
+        @Volatile
+        var dnsServer: String = DNS_ADDRESS
             private set
 
         /** Fires state changes to the Flutter layer (AppPlugin registers it). */
@@ -83,6 +95,7 @@ class VpnService : SystemVpnService() {
                         return START_NOT_STICKY
                     }
                     socksPort = port
+                    dnsServer = intent.getStringExtra(EXTRA_DNS_SERVER) ?: DNS_ADDRESS
                     startTun()
                 }
 
@@ -205,7 +218,7 @@ class VpnService : SystemVpnService() {
         val builder = Builder()
         builder.addAddress(InetAddress.getByName(IPV4_ADDRESS), IPV4_PREFIX)
         builder.addRoute(InetAddress.getByName("0.0.0.0"), 0)
-        builder.addDnsServer(InetAddress.getByName(DNS_ADDRESS))
+        builder.addDnsServer(InetAddress.getByName(dnsServer))
         builder.setMtu(MTU)
         builder.setSession("zhihu-proxy")
         builder.setBlocking(false)
@@ -215,11 +228,21 @@ class VpnService : SystemVpnService() {
         // Bypass the tunnel for this app so DIRECT flows leave via the
         // physical interface (see class doc).
         builder.addDisallowedApplication(packageName)
+        // Bind the tunnel to the current physical network. Without an
+        // underlying network the VPN may not become the default network on
+        // Android 12+ (traffic keeps egressing over the physical interface).
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val underlying = cm?.allNetworks
+            ?.firstOrNull { cm.getNetworkCapabilities(it)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true }
+        if (underlying != null) {
+            builder.setUnderlyingNetworks(arrayOf(underlying))
+        }
         try {
             builder.addRoute(InetAddress.getByName("::"), 0)
         } catch (_: Exception) {
             // IPv6 routing unsupported by the device: fine, IPv4 still works.
         }
+        Log.i(TAG, "establishTun: address=$IPV4_ADDRESS/$IPV4_PREFIX dns=$dnsServer mtu=$MTU packageName=$packageName")
         return builder.establish()
     }
 
@@ -239,7 +262,7 @@ class VpnService : SystemVpnService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("知乎代理")
+            .setContentTitle("代理")
             .setContentText(if (connecting) "正在连接…" else "代理运行中")
             .setSmallIcon(R.drawable.ic_stat_vpn)
             .setContentIntent(contentIntent)

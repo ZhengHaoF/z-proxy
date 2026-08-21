@@ -82,7 +82,8 @@ class AppPlugin :
 
             "start" -> {
                 val port = call.argument<Int>("port") ?: 0
-                result.success(mapOf("started" to startVpn(port)))
+                val dnsServer = call.argument<String>("dnsServer")
+                result.success(mapOf("started" to startVpn(port, dnsServer)))
             }
 
             "stop" -> {
@@ -109,9 +110,9 @@ class AppPlugin :
         }
     }
 
-    private fun startVpn(port: Int): Boolean {
+    private fun startVpn(port: Int, dnsServer: String?): Boolean {
         val context = activity ?: return false
-        val started = ServiceController.start(context, port)
+        val started = ServiceController.start(context, port, dnsServer)
         if (started) {
             // The service pushes the running state via the event channel.
         }

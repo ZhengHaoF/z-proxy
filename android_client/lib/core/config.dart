@@ -8,6 +8,7 @@ const defaults = Config(
   token: 'zhihu-proxy-dev',
   mode: 'matched',
   bypass: ['localhost', '127.0.0.1', '::1'],
+  dnsServer: '223.5.5.5',
 );
 
 /// Port of Python `DEFAULTS` / `load_config` (proxy_client.py L26-49).
@@ -19,6 +20,11 @@ class Config {
   final String mode;
   final List<String> bypass;
 
+  /// Android-only: DNS server handed to the VPN (the virtual TUN address is
+  /// not routable, so the browser's DNS queries must reach a real server
+  /// through the SOCKS5 UDP relay). Defaults to AliDNS for CN reachability.
+  final String dnsServer;
+
   const Config({
     required this.clientPort,
     required this.serverHost,
@@ -26,6 +32,7 @@ class Config {
     required this.token,
     required this.mode,
     required this.bypass,
+    required this.dnsServer,
   });
 
   factory Config.fromJson(Map<String, dynamic> json) {
@@ -40,6 +47,9 @@ class Config {
       bypass: json['bypass'] is List
           ? (json['bypass'] as List).whereType<String>().toList()
           : defaults.bypass,
+      dnsServer: json['dns_server'] is String
+          ? json['dns_server'] as String
+          : defaults.dnsServer,
     );
   }
 
@@ -50,6 +60,7 @@ class Config {
         'token': token,
         'mode': mode,
         'bypass': bypass,
+        'dns_server': dnsServer,
       };
 }
 

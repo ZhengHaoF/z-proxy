@@ -35,7 +35,7 @@ object Tun2Socks {
     /** Starts the engine with the given tun [fd]; returns `false` on failure. */
     fun start(fd: Int, socksPort: Int, mtu: Int): Boolean {
         stop()
-        Log.i(TAG, "engine start fd=$fd socksPort=$socksPort")
+        Log.i(TAG, "engine start fd=$fd socksPort=$socksPort mtu=$mtu")
         val code = try {
             nativeStart(fd, "socks5://127.0.0.1:$socksPort", mtu, "info")
         } catch (t: Throwable) {
@@ -43,7 +43,9 @@ object Tun2Socks {
             return false
         }
         running = code == 0
-        if (!running) {
+        if (running) {
+            Log.i(TAG, "engine started: socks5://127.0.0.1:$socksPort")
+        } else {
             Log.e(TAG, "engine start returned code=$code")
         }
         return running

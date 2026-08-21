@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:developer' as developer;
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -29,6 +30,7 @@ class ProxyEngine {
     required this.rules,
     required this.mode,
     this.bypass,
+    this.dnsServer,
     this.timeout = const Duration(seconds: 15),
   });
 
@@ -38,6 +40,7 @@ class ProxyEngine {
   final List<String> rules;
   final String mode;
   final List<String>? bypass;
+  final String? dnsServer;
 
   /// Upstream ACK timeout for CONNECT tunnels (Python default: 15s).
   final Duration timeout;
@@ -46,8 +49,12 @@ class ProxyEngine {
 
   ServerSocket? _server;
   ServerSocket? _socksServer;
+  int _socksPort = 0;
   final _active = <Socket>{};
   void Function(String tag, String target)? _onRequest;
+
+  /// The local SOCKS5 proxy port (0 when not running).
+  int get socksPort => _socksPort;
 
   /// Starts listening on a random loopback port; returns the bound port.
   Future<int> serve() async {
@@ -63,6 +70,7 @@ class ProxyEngine {
   Future<int> serveSocks() async {
     final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
     _socksServer = server;
+    _socksPort = server.port;
     server.listen(_onSocksClient, onError: (_) {});
     return server.port;
   }
@@ -124,6 +132,10 @@ class ProxyEngine {
       if (req == null) {
         return;
       }
+      developer.log(
+        'socks request ${req.host}:${req.port} command=${req.command}',
+        name: 'ZhihuProxyProxy',
+      );
       if (req.command == 2) {
         // BIND (RFC 1928 §6) is not implemented: reply and close.
         await _replyAndClose(client, const [0x05, socksCommandNotSupported]);
@@ -138,7 +150,11 @@ class ProxyEngine {
         await _replyAndClose(client, const [0x05, socksCommandNotSupported]);
         return;
       }
-      final via = useServer(req.host, rules: rules, mode: mode, bypass: bypass);
+      final isDns = req.port == 53 ||
+          req.port == 853 ||
+          (dnsServer != null && dnsServer!.isNotEmpty && req.host == dnsServer);
+      final via = !isDns &&
+          useServer(req.host, rules: rules, mode: mode, bypass: bypass);
       _logRequest(via ? 'TUNNEL' : 'DIRECT', '${req.host}:${req.port}');
       final early = buf.takeRemaining();
       if (via) {
@@ -183,10 +199,11 @@ class ProxyEngine {
   }
 
   // SOCKS5 UDP ASSOCIATE (RFC 1928 §7): binds a relay port, replies with
-  // `granted` + relay address, then forwards datagrams from the client to
-  // their destinations. Outbound sockets live in this process (excluded from
-  // the VPN), so DNS and other UDP traffic reaches the physical network —
-  // this is what makes system DNS work behind the tunnel.
+  // `granted` + relay address (127.0.0.1 so the client has a reachable
+  // destination — 0.0.0.0 is not routable), then forwards datagrams from
+  // the client to their destinations. Outbound sockets live in this process
+  // (excluded from the VPN), so DNS and other UDP traffic reaches the
+  // physical network — this is what makes system DNS work behind the tunnel.
   Future<void> _startUdpRelay(Socket client, StreamIterator<List<int>> it) async {
     final relay = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
     final sessions = <String, _UdpSession>{};
@@ -202,7 +219,7 @@ class ProxyEngine {
     });
     try {
       final p = relay.port;
-      client.add([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, (p >> 8) & 0xff, p & 0xff]);
+      client.add([0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, (p >> 8) & 0xff, p & 0xff]);
       await client.flush();
       relay.listen((event) {
         if (event != RawSocketEvent.read) {
@@ -386,7 +403,15 @@ class ProxyEngine {
     late Socket upstream;
     try {
       upstream = await Socket.connect(serverHost, serverPort);
+      developer.log(
+        'upstream connected $serverHost:$serverPort target=$host:$port',
+        name: 'ZhihuProxyProxy',
+      );
     } catch (_) {
+      developer.log(
+        'upstream connect failed $serverHost:$serverPort target=$host:$port',
+        name: 'ZhihuProxyProxy',
+      );
       await onDown(client);
       return;
     }
@@ -412,6 +437,10 @@ class ProxyEngine {
         await onRejected(client, code, '${info['m'] ?? 'Bad Gateway'}');
         return;
       }
+      developer.log(
+        'upstream acknowledged target=$host:$port',
+        name: 'ZhihuProxyProxy',
+      );
       established = true;
     } catch (_) {
       return;

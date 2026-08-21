@@ -34,7 +34,7 @@ class _ZhihuProxyAppState extends State<ZhihuProxyApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '知乎代理',
+      title: '代理',
       theme: ThemeData(
         colorSchemeSeed: Colors.teal,
         useMaterial3: true,
@@ -69,7 +69,7 @@ class _HomeShellState extends State<HomeShell> {
           SettingsPage(services: services),
         ];
         return Scaffold(
-          appBar: AppBar(title: const Text('知乎代理')),
+          appBar: AppBar(title: const Text('代理')),
           body: IndexedStack(index: _index, children: pages),
           bottomNavigationBar: NavigationBar(
             selectedIndex: _index,

@@ -18,7 +18,7 @@ object ServiceController {
 
     /** Starts the VPN foreground service; the caller must have run
      * [prepare] first. */
-    fun start(context: Context, socksPort: Int): Boolean {
+    fun start(context: Context, socksPort: Int, dnsServer: String? = null): Boolean {
         return try {
             if (socksPort <= 0 || android.net.VpnService.prepare(context) != null) {
                 false
@@ -26,6 +26,7 @@ object ServiceController {
                 val intent = Intent(context, VpnService::class.java)
                     .setAction(VpnService.ACTION_START)
                     .putExtra(VpnService.EXTRA_SOCKS_PORT, socksPort)
+                    .putExtra(VpnService.EXTRA_DNS_SERVER, dnsServer ?: VpnService.DNS_ADDRESS)
                 ContextCompat.startForegroundService(context, intent)
                 true
             }

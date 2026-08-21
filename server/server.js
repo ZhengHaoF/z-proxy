@@ -135,7 +135,8 @@ const server = net.createServer((clientSocket) => {
 function handleConnect(clientSocket, target, leftover) {
   console.log(`[recv] CONNECT ${target}`);
   const idx = (target || '').lastIndexOf(':');
-  const host = idx > 0 ? target.slice(0, idx) : target;
+  let host = idx > 0 ? target.slice(0, idx) : target;
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
   let port = idx > 0 ? parseInt(target.slice(idx + 1), 10) : 443;
   if (!port) port = 443;
 
@@ -146,6 +147,7 @@ function handleConnect(clientSocket, target, leftover) {
   // c-ares 的 resolve4/resolve6（getaddrinfo 会对超大 AAAA 集合的域名永久挂起，
   // 例如 www.zhihu.com —— 那是上一版隧道的病根）
   const resolveHost = async () => {
+    if (net.isIP(host)) return [host];
     try {
       const v4 = await dns.resolve4(host);
       if (v4 && v4.length) return v4;

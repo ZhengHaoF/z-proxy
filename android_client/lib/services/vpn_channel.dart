@@ -30,10 +30,10 @@ class VpnChannel {
     return r?['granted'] == true;
   }
 
-  Future<bool> start(int port) async {
+  Future<bool> start(int port, String dnsServer) async {
     final r = await _channel.invokeMapMethod<String, dynamic>(
       'start',
-      {'port': port},
+      {'port': port, 'dnsServer': dnsServer},
     );
     return r?['started'] == true;
   }
