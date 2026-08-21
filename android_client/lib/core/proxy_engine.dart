@@ -6,6 +6,13 @@ import 'dart:typed_data';
 import 'crypto_frame.dart';
 import 'http_parse.dart';
 import 'rules.dart';
+import 'socks5.dart';
+
+/// Reply style for tunnel setup (HTTP proxy vs SOCKS5 write different bytes).
+typedef _ReplyOnDown = Future<void> Function(Socket client);
+typedef _ReplyOnRejected =
+    Future<void> Function(Socket client, int? code, String? reason);
+typedef _ReplyOnEstablished = Future<void> Function(Socket client);
 
 /// Local HTTP proxy engine, port of `client/proxy_client.py` (L352-537).
 ///
@@ -38,6 +45,7 @@ class ProxyEngine {
   late final Uint8List _key = keyFor(token);
 
   ServerSocket? _server;
+  ServerSocket? _socksServer;
   final _active = <Socket>{};
   void Function(String tag, String target)? _onRequest;
 
@@ -49,6 +57,16 @@ class ProxyEngine {
     return server.port;
   }
 
+  /// Starts listening for SOCKS5 clients (RFC 1928) on a random loopback
+  /// port; returns the bound port. CONNECT is routed through the same
+  /// `useServer` decision as the HTTP proxy.
+  Future<int> serveSocks() async {
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    _socksServer = server;
+    server.listen(_onSocksClient, onError: (_) {});
+    return server.port;
+  }
+
   /// Cancels all active client connections (the listener stays up).
   Future<void> stop() async {
     for (final s in List<Socket>.of(_active)) {
@@ -56,13 +74,18 @@ class ProxyEngine {
     }
   }
 
-  /// Cancels active connections and releases the listening port.
+  /// Cancels active connections and releases the listening ports.
   Future<void> close() async {
     await stop();
     final s = _server;
     _server = null;
     if (s != null) {
       await s.close();
+    }
+    final socks = _socksServer;
+    _socksServer = null;
+    if (socks != null) {
+      await socks.close();
     }
   }
 
@@ -75,6 +98,79 @@ class ProxyEngine {
   void _onClient(Socket client) {
     _active.add(client);
     unawaited(_handleClient(client));
+  }
+
+  void _onSocksClient(Socket client) {
+    _active.add(client);
+    unawaited(_handleSocks(client));
+  }
+
+  Future<void> _handleSocks(Socket client) async {
+    final it = StreamIterator(client);
+    final buf = SocksBuf();
+    const granted = [0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+    try {
+      final method = await readSocksHandshake(it, buf);
+      if (method == null) {
+        return;
+      }
+      if (method < 0) {
+        await _replyAndClose(client, const [0x05, 0xFF]);
+        return;
+      }
+      client.add(const [0x05, 0x00]);
+      await client.flush();
+      final req = await readSocksRequest(it, buf);
+      if (req == null) {
+        return;
+      }
+      if (req.command != 1) {
+        // Only CONNECT is implemented (BIND / UDP ASSOCIATE unsupported).
+        await _replyAndClose(client, const [0x05, socksCommandNotSupported]);
+        return;
+      }
+      final via = useServer(req.host, rules: rules, mode: mode, bypass: bypass);
+      _logRequest(via ? 'TUNNEL' : 'DIRECT', '${req.host}:${req.port}');
+      final early = buf.takeRemaining();
+      if (via) {
+        await _forwardConnectToServer(
+          client,
+          it,
+          req.host,
+          req.port,
+          early,
+          onDown: (c) =>
+              _replyAndClose(c, const [0x05, socksConnectionRefused]),
+          onRejected: (c, code, reason) =>
+              _replyAndClose(c, const [0x05, socksGeneralFailure]),
+          onEstablished: (c) async {
+            c.add(granted);
+            await c.flush();
+          },
+        );
+      } else {
+        await _connectDirect(
+          client,
+          it,
+          req.host,
+          req.port,
+          early,
+          onDown: (c) =>
+              _replyAndClose(c, const [0x05, socksConnectionRefused]),
+          onEstablished: (c) async {
+            c.add(granted);
+            await c.flush();
+          },
+        );
+      }
+    } catch (_) {
+    } finally {
+      _active.remove(client);
+      try {
+        await it.cancel();
+      } catch (_) {}
+      _closeQuietly(client);
+    }
   }
 
   Future<void> _handleClient(Socket client) async {
@@ -109,9 +205,35 @@ class ProxyEngine {
         final via = useServer(host, rules: rules, mode: mode, bypass: bypass);
         _logRequest(via ? 'TUNNEL' : 'DIRECT', '$host:$port');
         if (via) {
-          await _forwardConnectToServer(client, it, host, port, head.rest);
+          await _forwardConnectToServer(
+            client,
+            it,
+            host,
+            port,
+            head.rest,
+            onDown: (c) async =>
+                _respondAndClose(c, 'HTTP/1.1 502 Bad Gateway\r\n\r\n'),
+            onRejected: (c, code, reason) async =>
+                _respondAndClose(c, 'HTTP/1.1 $code $reason\r\n\r\n'),
+            onEstablished: (c) async {
+              c.add(utf8.encode('HTTP/1.1 200 Connection Established\r\n\r\n'));
+              await c.flush();
+            },
+          );
         } else {
-          await _connectDirect(client, it, host, port, head.rest);
+          await _connectDirect(
+            client,
+            it,
+            host,
+            port,
+            head.rest,
+            onDown: (c) async =>
+                _respondAndClose(c, 'HTTP/1.1 502 Bad Gateway\r\n\r\n'),
+            onEstablished: (c) async {
+              c.add(utf8.encode('HTTP/1.1 200 Connection Established\r\n\r\n'));
+              await c.flush();
+            },
+          );
         }
         return;
       }
@@ -134,21 +256,26 @@ class ProxyEngine {
     }
   }
 
-  // Port of `forward_connect_to_server` (proxy_client.py L390-433): send the
-  // CONNECT frame (plus any early client bytes such as TLS ClientHello),
-  // require the ACK within [timeout], then pipe both directions.
+  // Shared CONNECT tunnel to the upstream server (port of Python
+  // `forward_connect_to_server` L390-433): send the CONNECT frame (plus any
+  // early client bytes such as TLS ClientHello), require the ACK within
+  // [timeout], invoke the reply callbacks, then pipe both directions. The
+  // HTTP proxy and the SOCKS5 entry drive this with different reply bytes.
   Future<void> _forwardConnectToServer(
     Socket client,
     StreamIterator<List<int>> clientIt,
     String host,
     int port,
-    Uint8List rest,
-  ) async {
+    Uint8List rest, {
+    required _ReplyOnDown onDown,
+    required _ReplyOnRejected onRejected,
+    required _ReplyOnEstablished onEstablished,
+  }) async {
     late Socket upstream;
     try {
       upstream = await Socket.connect(serverHost, serverPort);
     } catch (_) {
-      await _respondAndClose(client, 'HTTP/1.1 502 Bad Gateway\r\n\r\n');
+      await onDown(client);
       return;
     }
     final ackIt = StreamIterator(upstream);
@@ -169,8 +296,8 @@ class ProxyEngine {
         return;
       }
       if (info['c'] != 200) {
-        final reason = info['m'] ?? 'Bad Gateway';
-        await _respondAndClose(client, 'HTTP/1.1 ${info['c']} $reason\r\n\r\n');
+        final code = info['c'] is int ? info['c'] as int : null;
+        await onRejected(client, code, '${info['m'] ?? 'Bad Gateway'}');
         return;
       }
       established = true;
@@ -185,24 +312,26 @@ class ProxyEngine {
         _closeQuietly(client);
       }
     }
-    client.add(utf8.encode('HTTP/1.1 200 Connection Established\r\n\r\n'));
-    await client.flush();
+    await onEstablished(client);
     await _pipe(client, clientIt, upstream, ackIt);
   }
 
-  // Port of `connect_direct` (proxy_client.py L436-447).
+  // Shared direct connection to the CONNECT target (port of Python
+  // `connect_direct` L436-447).
   Future<void> _connectDirect(
     Socket client,
     StreamIterator<List<int>> clientIt,
     String host,
     int port,
-    Uint8List rest,
-  ) async {
+    Uint8List rest, {
+    required _ReplyOnDown onDown,
+    required _ReplyOnEstablished onEstablished,
+  }) async {
     late Socket target;
     try {
       target = await Socket.connect(host, port);
     } catch (_) {
-      await _respondAndClose(client, 'HTTP/1.1 502 Bad Gateway\r\n\r\n');
+      await onDown(client);
       return;
     }
     final targetIt = StreamIterator(target);
@@ -211,8 +340,7 @@ class ProxyEngine {
         target.add(rest);
         await target.flush();
       }
-      client.add(utf8.encode('HTTP/1.1 200 Connection Established\r\n\r\n'));
-      await client.flush();
+      await onEstablished(client);
     } catch (_) {
       _closeQuietly(target);
       _closeQuietly(client);
@@ -343,6 +471,16 @@ class ProxyEngine {
     try {
       s.destroy();
     } catch (_) {}
+  }
+
+  Future<void> _replyAndClose(Socket client, List<int> bytes) async {
+    try {
+      client.add(bytes);
+      await client.flush();
+      client.close();
+    } catch (_) {
+      _closeQuietly(client);
+    }
   }
 
   Future<void> _respondAndClose(Socket client, String text) async {
