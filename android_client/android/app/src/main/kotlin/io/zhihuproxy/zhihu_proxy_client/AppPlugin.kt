@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.ActivityCompat
@@ -55,7 +57,13 @@ class AppPlugin :
         stateChannel = EventChannel(binding.binaryMessenger, "zhihu_proxy/vpn_state")
         stateChannel.setStreamHandler(this)
         VpnService.stateListener = { running ->
-            stateSink?.success(mapOf("running" to running))
+            val sink = stateSink
+            if (sink != null) {
+                // Flutter's EventSink requires the main thread.
+                Handler(Looper.getMainLooper()).post {
+                    sink.success(mapOf("running" to running))
+                }
+            }
         }
     }
 

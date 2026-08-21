@@ -73,7 +73,13 @@ class AppServices extends ChangeNotifier {
   Future<void> start() async {
     lastError = null;
     notifyListeners();
-    vpnAuthorized = await vpn.prepare();
+    try {
+      vpnAuthorized = await vpn.prepare();
+    } catch (e) {
+      lastError = '授权失败: $e';
+      notifyListeners();
+      return;
+    }
     if (!vpnAuthorized) {
       notifyListeners();
       return;

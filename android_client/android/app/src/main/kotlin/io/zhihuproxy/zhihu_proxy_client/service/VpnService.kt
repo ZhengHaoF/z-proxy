@@ -6,6 +6,8 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.net.VpnService as SystemVpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -52,6 +54,8 @@ class VpnService : SystemVpnService() {
     }
 
     private var tunFd: ParcelFileDescriptor? = null
+    private var starting = false
+    private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var networkWatch: NetworkObserveModule
 
     override fun onCreate() {
@@ -115,43 +119,72 @@ class VpnService : SystemVpnService() {
         super.onDestroy()
     }
 
-    /** Establishes the tun session and launches tun2socks. */
+    /** Establishes the tun session and launches the in-process engine.
+     * Runs async: the foreground notification must be posted before the
+     * (potentially slow, emulator-translated) engine startup finishes,
+     * otherwise Android kills the service for missing `startForeground`
+     * within the 5s window. */
     fun startTun() {
-        if (isRunning) {
+        if (isRunning || starting) {
             return
         }
+        starting = true
         Log.i(TAG, "startTun: socksPort=$socksPort")
-        val fd = establishTun() ?: run {
-            Log.e(TAG, "VPN establishment was rejected by the system")
+        startForeground(connecting = true)
+        Thread {
+            try {
+                val fd = establishTun()
+                if (fd == null) {
+                    Log.e(TAG, "VPN establishment was rejected by the system")
+                    postTunFailure("establish rejected")
+                    return@Thread
+                }
+                tunFd = fd
+                Log.i(TAG, "tun established fd=${fd.fd}")
+                val started = Tun2Socks.start(fd = fd.fd, socksPort = socksPort, mtu = MTU)
+                Log.i(TAG, "engine launched=$started")
+                if (!started) {
+                    fd.close()
+                    tunFd = null
+                    postTunFailure("engine start failed")
+                    return@Thread
+                }
+                // The engine now owns the tun fd: detach the Java handle so
+                // nothing can double-close it (fdsan aborts the process).
+                fd.detachFd()
+                tunFd = null
+                isRunning = true
+                starting = false
+                runOnMain {
+                    startForeground(connecting = false)
+                    Log.i(TAG, "vpn running")
+                    stateListener?.invoke(true)
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "startTun failed", t)
+                postTunFailure("exception: ${t.message}")
+            }
+        }.apply { name = "vpn-tun"; start() }
+    }
+
+    private fun postTunFailure(reason: String) {
+        starting = false
+        isRunning = false
+        Log.e(TAG, "tunnel failed: $reason")
+        runOnMain {
+            stopForeground(true)
             stateListener?.invoke(false)
             stopSelf()
-            return
         }
-        tunFd = fd
-        Log.i(TAG, "tun established fd=${fd.fd}")
-        val started = Tun2Socks.start(
-            context = this,
-            fd = fd.fd,
-            socksPort = socksPort,
-            mtu = MTU,
-            onExit = ::onTun2SocksExited,
-        )
-        Log.i(TAG, "tun2socks launched=$started")
-        if (!started) {
-            fd.close()
-            tunFd = null
-            stateListener?.invoke(false)
-            stopSelf()
-            return
-        }
-        isRunning = true
-        startForeground()
-        Log.i(TAG, "vpn running")
-        stateListener?.invoke(true)
+    }
+
+    private fun runOnMain(block: () -> Unit) {
+        mainHandler.post(block)
     }
 
     /** Tears down tun2socks and the tun device; the service itself stays up. */
     fun stopTun() {
+        starting = false
         if (!isRunning && tunFd == null) {
             return
         }
@@ -166,14 +199,6 @@ class VpnService : SystemVpnService() {
     private fun restartTun() {
         stopTun()
         startTun()
-    }
-
-    private fun onTun2SocksExited() {
-        Log.w(TAG, "tun2socks process exited unexpectedly")
-        if (isRunning) {
-            stopTun()
-            stateListener?.invoke(false)
-        }
     }
 
     private fun establishTun(): ParcelFileDescriptor? {
@@ -198,7 +223,7 @@ class VpnService : SystemVpnService() {
         return builder.establish()
     }
 
-    private fun startForeground() {
+    private fun startForeground(connecting: Boolean) {
         createChannel()
         val stopIntent = Intent(this, VpnService::class.java).setAction(ACTION_STOP)
         val stopPi = PendingIntent.getService(
@@ -215,7 +240,7 @@ class VpnService : SystemVpnService() {
         )
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("知乎代理")
-            .setContentText("代理运行中")
+            .setContentText(if (connecting) "正在连接…" else "代理运行中")
             .setSmallIcon(R.drawable.ic_stat_vpn)
             .setContentIntent(contentIntent)
             .setOngoing(true)
