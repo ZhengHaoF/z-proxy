@@ -67,32 +67,38 @@ class VpnService : SystemVpnService() {
     override fun onBind(intent: Intent): android.os.IBinder? = super.onBind(intent)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_START -> {
-                val port = intent.getIntExtra(EXTRA_SOCKS_PORT, 0)
-                if (port <= 0) {
-                    // Always-on may restart the service while the UI (which owns
-                    // the SOCKS engine) is dead; ask the UI layer to restore.
-                    stateListener?.invoke(false)
-                    stopSelf()
-                    return START_NOT_STICKY
+        return try {
+            when (intent?.action) {
+                ACTION_START -> {
+                    val port = intent.getIntExtra(EXTRA_SOCKS_PORT, 0)
+                    if (port <= 0) {
+                        // Always-on may restart the service while the UI (which owns
+                        // the SOCKS engine) is dead; ask the UI layer to restore.
+                        stateListener?.invoke(false)
+                        stopSelf()
+                        return START_NOT_STICKY
+                    }
+                    socksPort = port
+                    startTun()
                 }
-                socksPort = port
-                startTun()
-            }
 
-            ACTION_STOP -> {
-                stopTun()
-                stopSelf()
-            }
+                ACTION_STOP -> {
+                    stopTun()
+                    stopSelf()
+                }
 
-            else -> {
-                // Started by the system (Always-on VPN) again; the UI must
-                // restore the engine before a tunnel can be established.
-                stateListener?.invoke(false)
+                else -> {
+                    // Started by the system (Always-on VPN) again; the UI must
+                    // restore the engine before a tunnel can be established.
+                    stateListener?.invoke(false)
+                }
             }
+            START_STICKY
+        } catch (t: Throwable) {
+            Log.e(TAG, "onStartCommand failed", t)
+            stopSelf()
+            START_NOT_STICKY
         }
-        return START_STICKY
     }
 
     override fun onRevoke() {
@@ -114,6 +120,7 @@ class VpnService : SystemVpnService() {
         if (isRunning) {
             return
         }
+        Log.i(TAG, "startTun: socksPort=$socksPort")
         val fd = establishTun() ?: run {
             Log.e(TAG, "VPN establishment was rejected by the system")
             stateListener?.invoke(false)
@@ -121,6 +128,7 @@ class VpnService : SystemVpnService() {
             return
         }
         tunFd = fd
+        Log.i(TAG, "tun established fd=${fd.fd}")
         val started = Tun2Socks.start(
             context = this,
             fd = fd.fd,
@@ -128,6 +136,7 @@ class VpnService : SystemVpnService() {
             mtu = MTU,
             onExit = ::onTun2SocksExited,
         )
+        Log.i(TAG, "tun2socks launched=$started")
         if (!started) {
             fd.close()
             tunFd = null
@@ -137,6 +146,7 @@ class VpnService : SystemVpnService() {
         }
         isRunning = true
         startForeground()
+        Log.i(TAG, "vpn running")
         stateListener?.invoke(true)
     }
 
