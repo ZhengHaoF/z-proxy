@@ -27,7 +27,7 @@ class AppServices extends ChangeNotifier {
     if (!vpnRunning || _startMillis == 0) {
       return 0;
     }
-    return DateTime.now().millisecondsSinceEpoch ~/ 1000 - _startMillis;
+    return (DateTime.now().millisecondsSinceEpoch - _startMillis) ~/ 1000;
   }
 
   Future<void> init() async {
