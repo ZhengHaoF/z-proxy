@@ -124,8 +124,17 @@ class ProxyEngine {
       if (req == null) {
         return;
       }
+      if (req.command == 2) {
+        // BIND (RFC 1928 §6) is not implemented: reply and close.
+        await _replyAndClose(client, const [0x05, socksCommandNotSupported]);
+        return;
+      }
+      if (req.command == 3) {
+        // UDP ASSOCIATE: run a UDP relay until the control channel closes.
+        await _startUdpRelay(client, it);
+        return;
+      }
       if (req.command != 1) {
-        // Only CONNECT is implemented (BIND / UDP ASSOCIATE unsupported).
         await _replyAndClose(client, const [0x05, socksCommandNotSupported]);
         return;
       }
@@ -171,6 +180,109 @@ class ProxyEngine {
       } catch (_) {}
       _closeQuietly(client);
     }
+  }
+
+  // SOCKS5 UDP ASSOCIATE (RFC 1928 §7): binds a relay port, replies with
+  // `granted` + relay address, then forwards datagrams from the client to
+  // their destinations. Outbound sockets live in this process (excluded from
+  // the VPN), so DNS and other UDP traffic reaches the physical network —
+  // this is what makes system DNS work behind the tunnel.
+  Future<void> _startUdpRelay(Socket client, StreamIterator<List<int>> it) async {
+    final relay = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+    final sessions = <String, _UdpSession>{};
+    final cleanup = Timer.periodic(const Duration(minutes: 1), (_) {
+      final now = DateTime.now();
+      sessions.removeWhere((key, s) {
+        if (now.difference(s.lastUsed) > const Duration(seconds: 90)) {
+          s.socket.close();
+          return true;
+        }
+        return false;
+      });
+    });
+    try {
+      final p = relay.port;
+      client.add([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, (p >> 8) & 0xff, p & 0xff]);
+      await client.flush();
+      relay.listen((event) {
+        if (event != RawSocketEvent.read) {
+          return;
+        }
+        final dg = relay.receive();
+        if (dg == null) {
+          return;
+        }
+        final env = parseUdpEnvelope(dg.data);
+        if (env == null) {
+          return;
+        }
+        unawaited(_udpForward(relay, dg, env, sessions));
+      });
+      // Keep the control channel open until the client closes it.
+      while (await it.moveNext()) {}
+    } finally {
+      cleanup.cancel();
+      relay.close();
+      for (final s in sessions.values) {
+        s.socket.close();
+      }
+      sessions.clear();
+    }
+  }
+
+  Future<void> _udpForward(
+    RawDatagramSocket relay,
+    Datagram req,
+    UdpEnvelope env,
+    Map<String, _UdpSession> sessions,
+  ) async {
+    final key = '${req.address.address}:${req.port}|${env.host}:${env.port}';
+    var session = sessions[key];
+    if (session == null) {
+      session = await _openUdpSession(key, req, relay, sessions);
+      sessions[key] = session;
+    }
+    session.lastUsed = DateTime.now();
+    final addr = InternetAddress.tryParse(env.host);
+    final list = addr != null ? null : await InternetAddress.lookup(env.host);
+    final target = addr ?? (list == null || list.isEmpty ? null : list.first);
+    if (target == null) {
+      return;
+    }
+    try {
+      session.socket.send(env.payload, target, env.port);
+    } catch (_) {
+      // unreachable target: drop silently
+    }
+  }
+
+  Future<_UdpSession> _openUdpSession(
+    String key,
+    Datagram req,
+    RawDatagramSocket relay,
+    Map<String, _UdpSession> sessions,
+  ) async {
+    final out = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+    out.listen((event) {
+      if (event != RawSocketEvent.read) {
+        return;
+      }
+      final d = out.receive();
+      if (d == null) {
+        return;
+      }
+      try {
+        relay.send(
+          buildUdpEnvelope(host: d.address.address, port: d.port, payload: d.data),
+          req.address,
+          req.port,
+        );
+      } catch (_) {
+        out.close();
+        sessions.remove(key);
+      }
+    });
+    return _UdpSession(out);
   }
 
   Future<void> _handleClient(Socket client) async {
@@ -528,6 +640,13 @@ class ProxyEngine {
     final port = int.tryParse(target.substring(i + 1)) ?? 443;
     return (host, port);
   }
+}
+
+class _UdpSession {
+  _UdpSession(this.socket);
+
+  final RawDatagramSocket socket;
+  DateTime lastUsed = DateTime.now();
 }
 
 /// PAC file content, port of Python `build_pac` (proxy_client.py L156-203)

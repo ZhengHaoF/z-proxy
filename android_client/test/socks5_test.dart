@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:zhihu_proxy_client/core/crypto_frame.dart';
 import 'package:zhihu_proxy_client/core/proxy_engine.dart';
+import 'package:zhihu_proxy_client/core/socks5.dart';
 
 const _token = 'socks5-test-token';
 final _key = keyFor(_token);
@@ -192,14 +193,78 @@ void main() {
     }
   });
 
-  test('BIND / UDP ASSOCIATE -> 05 07 then close', () async {
+  test('UDP ASSOCIATE -> granted with relay port; datagram roundtrip',
+      () async {
+    final echo = await RawDatagramSocket.bind(
+      InternetAddress.loopbackIPv4,
+      0,
+    );
+    echo.listen((event) {
+      if (event == RawSocketEvent.read) {
+        final d = echo.receive();
+        if (d != null) {
+          echo.send(d.data, d.address, d.port);
+        }
+      }
+    });
+    try {
+      port = await engine.serveSocks();
+      final client = await Socket.connect(InternetAddress.loopbackIPv4, port);
+      final it = StreamIterator(client);
+      try {
+        await _writeBytes(client, [5, 1, 0]);
+        expect(await _readUpTo(it, 2), [5, 0]);
+        // UDP ASSOCIATE with 0.0.0.0:0 as the client's reported address.
+        await _writeBytes(client, [5, 3, 0, 1, 0, 0, 0, 0, 0, 0]);
+        final reply = await _readUpTo(it, 10);
+        expect(reply.sublist(0, 4), [5, 0, 0, 1]);
+        final relayPort = (reply[8] << 8) | reply[9];
+        expect(relayPort, greaterThan(0));
+
+        final relaySock = await RawDatagramSocket.bind(
+          InternetAddress.loopbackIPv4,
+          0,
+        );
+        final received = Completer<UdpEnvelope>();
+        relaySock.listen((event) {
+          if (event == RawSocketEvent.read) {
+            final d = relaySock.receive();
+            if (d != null && !received.isCompleted) {
+              received.complete(parseUdpEnvelope(d.data));
+            }
+          }
+        });
+        // Envelope: RSV FRAG ATYP(1) 127.0.0.1 echoPort payload.
+        final e = echo.port;
+        final env = [
+          0, 0, 0, 1, 127, 0, 0, 1, (e >> 8) & 0xff, e & 0xff,
+          ...utf8.encode('hello'),
+        ];
+        relaySock.send(env, InternetAddress.loopbackIPv4, relayPort);
+        final reply2 = await received.future.timeout(
+          const Duration(seconds: 3),
+        );
+        expect(reply2.host, '127.0.0.1');
+        expect(reply2.port, echo.port);
+        expect(utf8.decode(reply2.payload), 'hello');
+        relaySock.close();
+      } finally {
+        await it.cancel();
+        client.destroy();
+      }
+    } finally {
+      echo.close();
+    }
+  });
+
+  test('BIND -> 05 07 then close', () async {
     port = await engine.serveSocks();
     final client = await Socket.connect(InternetAddress.loopbackIPv4, port);
     final it = StreamIterator(client);
     try {
       await _writeBytes(client, [5, 1, 0]);
       expect(await _readUpTo(it, 2), [5, 0]);
-      await _writeBytes(client, [5, 3, 0, 1, 0, 0, 0, 0, 0, 0]);
+      await _writeBytes(client, [5, 2, 0, 1, 0, 0, 0, 0, 0, 0]);
       expect(await _readUpTo(it, 2), [5, 7]);
       expect(await it.moveNext(), isFalse);
     } finally {
