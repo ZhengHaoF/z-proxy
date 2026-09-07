@@ -1,4 +1,4 @@
-package io.zhihuproxy.zhihu_proxy_client
+package io.zproxy.zproxy_client
 
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.android.FlutterActivity

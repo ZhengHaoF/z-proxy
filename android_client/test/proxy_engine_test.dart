@@ -4,8 +4,8 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:zhihu_proxy_client/core/crypto_frame.dart';
-import 'package:zhihu_proxy_client/core/proxy_engine.dart';
+import 'package:zproxy_client/core/crypto_frame.dart';
+import 'package:zproxy_client/core/proxy_engine.dart';
 
 const _token = 'tunnel-test-token';
 final _key = keyFor(_token);

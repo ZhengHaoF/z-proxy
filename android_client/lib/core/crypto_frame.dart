@@ -6,7 +6,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 
 const magicByte = 0x5A;
-const encCtx = 'zhihu-proxy:enc:v1';
+const encCtx = 'z-proxy:enc:v1';
 const maxPayload = 65536;
 const nonceLen = 16;
 const tagLen = 32;

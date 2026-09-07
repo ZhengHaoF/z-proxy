@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:zhihu_proxy_client/services/app_services.dart';
+import 'package:zproxy_client/services/app_services.dart';
 
 class RulesPage extends StatefulWidget {
   const RulesPage({super.key, required this.services});

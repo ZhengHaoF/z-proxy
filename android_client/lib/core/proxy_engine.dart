@@ -134,7 +134,7 @@ class ProxyEngine {
       }
       developer.log(
         'socks request ${req.host}:${req.port} command=${req.command}',
-        name: 'ZhihuProxyProxy',
+        name: 'ZProxyProxy',
       );
       if (req.command == 2) {
         // BIND (RFC 1928 §6) is not implemented: reply and close.
@@ -405,12 +405,12 @@ class ProxyEngine {
       upstream = await Socket.connect(serverHost, serverPort);
       developer.log(
         'upstream connected $serverHost:$serverPort target=$host:$port',
-        name: 'ZhihuProxyProxy',
+        name: 'ZProxyProxy',
       );
     } catch (_) {
       developer.log(
         'upstream connect failed $serverHost:$serverPort target=$host:$port',
-        name: 'ZhihuProxyProxy',
+        name: 'ZProxyProxy',
       );
       await onDown(client);
       return;
@@ -439,7 +439,7 @@ class ProxyEngine {
       }
       developer.log(
         'upstream acknowledged target=$host:$port',
-        name: 'ZhihuProxyProxy',
+        name: 'ZProxyProxy',
       );
       established = true;
     } catch (_) {

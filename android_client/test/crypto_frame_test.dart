@@ -4,7 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:zhihu_proxy_client/core/crypto_frame.dart';
+import 'package:zproxy_client/core/crypto_frame.dart';
 
 Uint8List _hexToBytes(String hex) {
   final bytes = Uint8List(hex.length ~/ 2);
@@ -30,11 +30,11 @@ void main() {
     });
 
     test('key derivation matches Python _key_for (known digest)', () {
-      // HMAC-SHA256(b"zhihu-proxy-dev", b"zhihu-proxy:enc:v1")
+      // HMAC-SHA256(b"z-proxy-dev", b"z-proxy:enc:v1")
       expect(
-        keyFor('zhihu-proxy-dev'),
+        keyFor('z-proxy-dev'),
         _hexToBytes(
-            'b9171b9773504774b8b35c1b348fa8480293aa626d31e96cd6d54649afad985d'),
+            '95e32339594ad33f3a870ad04d8c8e02f5ac9df9c3d102315b227098b51b8a5b'),
       );
     });
   });

@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'client'))
 from proxy_client import _key_for, decrypt_frame, encrypt_frame
 
-TOKEN = 'zhihu-proxy-dev'
+TOKEN = 'z-proxy-dev'
 OUT = Path(__file__).resolve().parent.parent / 'test' / 'vectors' / 'frames.json'
 
 

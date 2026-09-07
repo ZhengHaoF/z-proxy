@@ -1,4 +1,4 @@
-package io.zhihuproxy.zhihu_proxy_client.service
+package io.zproxy.zproxy_client.service
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -15,8 +15,8 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import io.zhihuproxy.zhihu_proxy_client.MainActivity
-import io.zhihuproxy.zhihu_proxy_client.R
+import io.zproxy.zproxy_client.MainActivity
+import io.zproxy.zproxy_client.R
 import java.net.InetAddress
 
 /**
@@ -31,10 +31,10 @@ import java.net.InetAddress
 class VpnService : SystemVpnService() {
 
     companion object {
-        private const val TAG = "ZhihuProxyVpn"
+        private const val TAG = "ZProxyVpn"
 
-        const val ACTION_START = "io.zhihuproxy.zhihu_proxy_client.action.VPN_START"
-        const val ACTION_STOP = "io.zhihuproxy.zhihu_proxy_client.action.VPN_STOP"
+        const val ACTION_START = "io.zproxy.zproxy_client.action.VPN_START"
+        const val ACTION_STOP = "io.zproxy.zproxy_client.action.VPN_STOP"
         const val EXTRA_SOCKS_PORT = "socks_port"
         const val EXTRA_DNS_SERVER = "dns_server"
 
@@ -220,7 +220,7 @@ class VpnService : SystemVpnService() {
         builder.addRoute(InetAddress.getByName("0.0.0.0"), 0)
         builder.addDnsServer(InetAddress.getByName(dnsServer))
         builder.setMtu(MTU)
-        builder.setSession("zhihu-proxy")
+        builder.setSession("z-proxy")
         builder.setBlocking(false)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             builder.setMetered(false)

@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:zhihu_proxy_client/core/rules.dart';
+import 'package:zproxy_client/core/rules.dart';
 
 void main() {
   group('domainMatches', () {

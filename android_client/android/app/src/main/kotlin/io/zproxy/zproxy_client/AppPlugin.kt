@@ -1,4 +1,4 @@
-package io.zhihuproxy.zhihu_proxy_client
+package io.zproxy.zproxy_client
 
 import android.Manifest
 import android.app.Activity
@@ -21,17 +21,17 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
-import io.zhihuproxy.zhihu_proxy_client.service.ServiceController
-import io.zhihuproxy.zhihu_proxy_client.service.VpnService
+import io.zproxy.zproxy_client.service.ServiceController
+import io.zproxy.zproxy_client.service.VpnService
 
 /**
  * Bridges the Flutter UI and the VPN layer:
  *
- * MethodChannel `zhihu_proxy/vpn` — `prepare` / `start` / `stop` /
+ * MethodChannel `zproxy/vpn` — `prepare` / `start` / `stop` /
  * `syncState` / `requestNotificationPermission` /
  * `isBatteryOptimizationDisabled` / `openBatteryOptimizationSettings`
  *
- * EventChannel `zhihu_proxy/vpn_state` — pushes `{running: bool}` on every
+ * EventChannel `zproxy/vpn_state` — pushes `{running: bool}` on every
  * tunnel state change (including revokes and always-on restarts).
  */
 class AppPlugin :
@@ -52,9 +52,9 @@ class AppPlugin :
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         application = binding.applicationContext
-        channel = MethodChannel(binding.binaryMessenger, "zhihu_proxy/vpn")
+        channel = MethodChannel(binding.binaryMessenger, "zproxy/vpn")
         channel.setMethodCallHandler(this)
-        stateChannel = EventChannel(binding.binaryMessenger, "zhihu_proxy/vpn_state")
+        stateChannel = EventChannel(binding.binaryMessenger, "zproxy/vpn_state")
         stateChannel.setStreamHandler(this)
         VpnService.stateListener = { running ->
             val sink = stateSink

@@ -1,7 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:zhihu_proxy_client/core/config.dart';
+import 'package:zproxy_client/core/config.dart';
 
 void main() {
   group('loadConfigFromJsonString', () {
@@ -10,7 +10,7 @@ void main() {
       expect(cfg.clientPort, 8787);
       expect(cfg.serverHost, '127.0.0.1');
       expect(cfg.serverPort, 8443);
-      expect(cfg.token, 'zhihu-proxy-dev');
+      expect(cfg.token, 'z-proxy-dev');
       expect(cfg.mode, 'matched');
       expect(cfg.bypass, ['localhost', '127.0.0.1', '::1']);
     });
@@ -20,7 +20,7 @@ void main() {
       expect(cfg.serverHost, 'example.com');
       expect(cfg.clientPort, 8787);
       expect(cfg.serverPort, 8443);
-      expect(cfg.token, 'zhihu-proxy-dev');
+      expect(cfg.token, 'z-proxy-dev');
     });
 
     test('full json matches input values', () {

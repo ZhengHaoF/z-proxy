@@ -1,4 +1,4 @@
-# zhihu_proxy_client
+# zproxy_client
 
 A new Flutter project.
 

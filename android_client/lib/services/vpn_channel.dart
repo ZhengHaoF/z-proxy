@@ -5,8 +5,8 @@ import 'package:flutter/services.dart';
 /// MethodChannel/EventChannel wrapper for the native VPN bridge
 /// (`AndroidManifest` service + `AppPlugin.kt`).
 class VpnChannel {
-  static const _channel = MethodChannel('zhihu_proxy/vpn');
-  static const _state = EventChannel('zhihu_proxy/vpn_state');
+  static const _channel = MethodChannel('zproxy/vpn');
+  static const _state = EventChannel('zproxy/vpn_state');
 
   StreamSubscription<dynamic>? _sub;
 

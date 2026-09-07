@@ -1,11 +1,11 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-import 'package:zhihu_proxy_client/core/config.dart';
-import 'package:zhihu_proxy_client/core/probe.dart';
-import 'package:zhihu_proxy_client/core/proxy_engine.dart';
-import 'package:zhihu_proxy_client/services/config_store.dart';
-import 'package:zhihu_proxy_client/services/vpn_channel.dart';
+import 'package:zproxy_client/core/config.dart';
+import 'package:zproxy_client/core/probe.dart';
+import 'package:zproxy_client/core/proxy_engine.dart';
+import 'package:zproxy_client/services/config_store.dart';
+import 'package:zproxy_client/services/vpn_channel.dart';
 
 /// App-wide state: config, rules, proxy engine lifecycle and the native VPN
 /// bridge. A single instance is shared by all pages.

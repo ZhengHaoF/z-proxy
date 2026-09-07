@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:zhihu_proxy_client/services/app_services.dart';
+import 'package:zproxy_client/services/app_services.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key, required this.services});

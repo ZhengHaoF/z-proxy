@@ -1,4 +1,4 @@
-package io.zhihuproxy.zhihu_proxy_client.service
+package io.zproxy.zproxy_client.service
 
 import android.content.Context
 import android.content.Intent

@@ -1,10 +1,10 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zhihu_proxy_client/main.dart';
+import 'package:zproxy_client/main.dart';
 
 void main() {
   testWidgets('app builds and shows the home shell', (WidgetTester tester) async {
-    await tester.pumpWidget(const ZhihuProxyApp());
+    await tester.pumpWidget(const ZProxyApp());
     await tester.pump(const Duration(seconds: 1));
 
     expect(find.text('代理'), findsOneWidget);

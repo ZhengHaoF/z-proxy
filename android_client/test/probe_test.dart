@@ -3,8 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:zhihu_proxy_client/core/crypto_frame.dart';
-import 'package:zhihu_proxy_client/core/probe.dart';
+import 'package:zproxy_client/core/crypto_frame.dart';
+import 'package:zproxy_client/core/probe.dart';
 
 const _token = 'probe-test-token';
 final _key = keyFor(_token);

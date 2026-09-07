@@ -1,8 +1,8 @@
-# zhihu-proxy 安卓客户端(Flutter)实施计划
+# z-proxy 安卓客户端(Flutter)实施计划
 
 > **For Claude:** REQUIRED SUB-SKILL: 使用 executing-plans 按任务逐条实施本计划。
 
-**Goal:** 在 Android 上实现 zhihu-proxy 客户端(系统级 VPN 形态):手机所有 App 的流量经规则分流,命中的域名走加密隧道到现有 Node 服务端,未命中的直连;服务端与加密协议零改动。
+**Goal:** 在 Android 上实现 z-proxy 客户端(系统级 VPN 形态):手机所有 App 的流量经规则分流,命中的域名走加密隧道到现有 Node 服务端,未命中的直连;服务端与加密协议零改动。
 
 **Architecture:** 三明治结构——① 纯 Dart 核心库(加密帧协议、规则引擎、HTTP/CONNECT 代理、SOCKS5 入口,全部可单测,参照 `client/proxy_client.py` 逐函数移植,新增 SOCKS5 协议入口供 tun2socks 接入);② 最小 Android 原生层(VpnService 建 TUN 并 detachFd,把 fd 交给 tun2socks 进程,由其把 IP 包还原成 SOCKS5 流打到本地 Dart 代理;MethodChannel 桥接);③ Flutter UI(开关/设置/规则管理/日志)。原生层参照 FlClash 的实现形态自行精简实现(FlClash 为 GPL-3.0,本项目按"参考 API 形态、自行实现"处理,不逐行复制,避免许可负担)。
 
@@ -37,12 +37,12 @@
 | 配置变更重启 | `android_client/lib/providers/vpn_manager.dart`(新建) | `FlClash/lib/manager/vpn_manager.dart` | 检测 VPN/配置变化,提示重启核心 |
 | 核心逻辑(自研) | `android_client/lib/core/*.dart`(新建) | 无借鉴,对照 `client/proxy_client.py` 逐函数移植 | 见 §2 |
 
-> 注意:`FlClash` 源码在 `D:\work\FlClash`(本地已 clone),建议保持只读引用;本项目代码在 `d:\work\zhihu-proxy\android_client\` 新建,不修改 `client/`(Python)与 `server/`。
+> 注意:`FlClash` 源码在 `D:\work\FlClash`(本地已 clone),建议保持只读引用;本项目代码在 `d:\work\z-proxy\android_client\` 新建,不修改 `client/`(Python)与 `server/`。
 
 ## 2. 仓库结构与 Dart 核心库(参考 `client/proxy_client.py`)
 
 ```
-d:\work\zhihu-proxy\
+d:\work\z-proxy\
 ├── docs\plans\2026-08-21-android-flutter-client.md   (本计划)
 └── android_client\
     ├── pubspec.yaml              # deps: crypto
@@ -86,15 +86,15 @@ java -version          # JDK 17
 
 **Step 2** 脚手架:
 ```pwsh
-cd d:\work\zhihu-proxy
-flutter create --project-name zhihu_proxy_client --org io.zhihuproxy --platforms android,windows android_client
+cd d:\work\z-proxy
+flutter create --project-name zproxy_client --org io.zproxy --platforms android,windows android_client
 cd android_client
 flutter pub add crypto
 flutter pub add --dev flutter_lints
 ```
 预期:目录生成、`flutter pub get` 成功。
 
-**Step 3** 提交基线(如果 `d:\work\zhihu-proxy` 是空 git 仓库;它当前不是 git 仓库,如后续要建仓:`git init` 后提交,并将 `android_client/android/.gradle`、`build/` 加入 .gitignore)。
+**Step 3** 提交基线(如果 `d:\work\z-proxy` 是空 git 仓库;它当前不是 git 仓库,如后续要建仓:`git init` 后提交,并将 `android_client/android/.gradle`、`build/` 加入 .gitignore)。
 
 ### M1:Dart 核心库(TDD,本计划重点)
 
@@ -108,25 +108,25 @@ flutter pub add --dev flutter_lints
 **Step 1** 写 `tools/gen_vectors.py`(基于 `client/proxy_client.py` 的协议函数):
 ```python
 import json, sys
-sys.path.insert(0, r'd:\work\zhihu-proxy\client')
+sys.path.insert(0, r'd:\work\z-proxy\client')
 from proxy_client import _key_for, encrypt_frame, decrypt_frame
 
-token = 'zhihu-proxy-dev'
+token = 'z-proxy-dev'
 payloads = [b'hello world', b'\x00\x01\x02\xff' * 64, json.dumps({'m': 'CONNECT', 't': 'example.com:443'}).encode()]
 vec = []
 for p in payloads:
     frame = encrypt_frame(payload=p, key=_key_for(token))
     assert decrypt_frame(frame, _key_for(token)) == p
     vec.append({'payload_hex': p.hex(), 'frame_hex': frame.hex()})
-with open(r'd:\work\zhihu-proxy\android_client\test\vectors\frames.json', 'w') as f:
+with open(r'd:\work\z-proxy\android_client\test\vectors\frames.json', 'w') as f:
     json.dump({'token': token, 'vectors': vec}, f, indent=2)
 print('OK', len(vec))
 ```
-生成逻辑说明:帧格式 `magic(0x5A)|len(4B BE)|nonce(16B)|ct|tag(32B)`,enc_key = HMAC-SHA256(token, "zhihu-proxy:enc:v1")。向量是 Python 侧加密 → Dart 侧解密,保证跨语言互通。
+生成逻辑说明:帧格式 `magic(0x5A)|len(4B BE)|nonce(16B)|ct|tag(32B)`,enc_key = HMAC-SHA256(token, "z-proxy:enc:v1")。向量是 Python 侧加密 → Dart 侧解密,保证跨语言互通。
 
 **Step 2** 用 PowerShell 7 运行:
 ```pwsh
-cd d:\work\zhihu-proxy\android_client
+cd d:\work\z-proxy\android_client
 python ..\client\..\tools\gen_vectors.py
 ```
 预期:输出 `OK 3`,`test/vectors/frames.json` 生成。注意 `python` 需 3.10+(项目 venv:`..\client\venv\Scripts\python.exe` 备选)。
@@ -137,7 +137,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:zhihu_proxy_client/core/crypto_frame.dart';
+import 'package:zproxy_client/core/crypto_frame.dart';
 
 void main() {
   final vectors = jsonDecode(
@@ -169,7 +169,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 
 const magicByte = 0x5A;
-const encCtx = 'zhihu-proxy:enc:v1';
+const encCtx = 'z-proxy:enc:v1';
 const maxPayload = 65536;
 const nonceLen = 16;
 const tagLen = 32;
@@ -339,4 +339,4 @@ flutter test test/probe_test.dart
 
 ## 5. 执行交接
 
-M1(纯 Dart,TDD)可在 `d:\work\zhihu-proxy\android_client` 独立完成,不依赖真机;M2 起需要 Android SDK/模拟器/真机。每完成一个 Task 提交一次;M1 完成时服务端无需任何改动,协议兼容由黄金向量保证。
+M1(纯 Dart,TDD)可在 `d:\work\z-proxy\android_client` 独立完成,不依赖真机;M2 起需要 Android SDK/模拟器/真机。每完成一个 Task 提交一次;M1 完成时服务端无需任何改动,协议兼容由黄金向量保证。

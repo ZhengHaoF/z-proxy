@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
-import 'package:zhihu_proxy_client/core/config.dart';
+import 'package:zproxy_client/core/config.dart';
 
 /// Persistent storage for `config.json` (settings) and `rules.json`
 /// (`{"rules":[...]}`, mirroring the Python client's layout).

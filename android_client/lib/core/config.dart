@@ -5,7 +5,7 @@ const defaults = Config(
   clientPort: 8787,
   serverHost: '127.0.0.1',
   serverPort: 8443,
-  token: 'zhihu-proxy-dev',
+  token: 'z-proxy-dev',
   mode: 'matched',
   bypass: ['localhost', '127.0.0.1', '::1'],
   dnsServer: '223.5.5.5',

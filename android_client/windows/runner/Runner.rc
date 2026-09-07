@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "io.zhihuproxy" "\0"
-            VALUE "FileDescription", "zhihu_proxy_client" "\0"
+            VALUE "CompanyName", "io.zproxy" "\0"
+            VALUE "FileDescription", "zproxy_client" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "zhihu_proxy_client" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 io.zhihuproxy. All rights reserved." "\0"
-            VALUE "OriginalFilename", "zhihu_proxy_client.exe" "\0"
-            VALUE "ProductName", "zhihu_proxy_client" "\0"
+            VALUE "InternalName", "zproxy_client" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 io.zproxy. All rights reserved." "\0"
+            VALUE "OriginalFilename", "zproxy_client.exe" "\0"
+            VALUE "ProductName", "zproxy_client" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

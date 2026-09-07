@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:zhihu_proxy_client/core/config.dart';
-import 'package:zhihu_proxy_client/pages/about_page.dart';
-import 'package:zhihu_proxy_client/services/app_services.dart';
+import 'package:zproxy_client/core/config.dart';
+import 'package:zproxy_client/pages/about_page.dart';
+import 'package:zproxy_client/services/app_services.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key, required this.services});

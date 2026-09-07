@@ -27,7 +27,7 @@ DEFAULTS = {
     'client_port': 8787,
     'server_host': '127.0.0.1',
     'server_port': 8443,
-    'token': 'zhihu-proxy-dev',
+    'token': 'z-proxy-dev',
     'mode': 'matched',
     'bypass': ['localhost', '127.0.0.1', '::1'],
 }
@@ -61,9 +61,9 @@ BYPASS = CFG.get('bypass', ['localhost', '127.0.0.1', '::1'])
 # 帧格式: magic(0x5A) | len(4B BE) | nonce(16B) | ciphertext(len) | tag(32B)
 # 加密: 密钥流 = HMAC-SHA256(enc_key, nonce || counter32)，ciphertext = payload XOR 密钥流
 # 鉴权: tag = HMAC-SHA256(enc_key, nonce || ciphertext)，服务端验 tag 即验 token
-# 密钥: enc_key = HMAC-SHA256(token, "zhihu-proxy:enc:v1")
+# 密钥: enc_key = HMAC-SHA256(token, "z-proxy:enc:v1")
 MAGIC = b'\x5A'
-ENC_CTX = 'zhihu-proxy:enc:v1'
+ENC_CTX = 'z-proxy:enc:v1'
 
 _server = None  # set inside serve()
 

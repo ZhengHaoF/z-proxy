@@ -1,22 +1,22 @@
 import 'package:flutter/material.dart';
-import 'package:zhihu_proxy_client/pages/home_page.dart';
-import 'package:zhihu_proxy_client/pages/logs_page.dart';
-import 'package:zhihu_proxy_client/pages/rules_page.dart';
-import 'package:zhihu_proxy_client/pages/settings_page.dart';
-import 'package:zhihu_proxy_client/services/app_services.dart';
+import 'package:zproxy_client/pages/home_page.dart';
+import 'package:zproxy_client/pages/logs_page.dart';
+import 'package:zproxy_client/pages/rules_page.dart';
+import 'package:zproxy_client/pages/settings_page.dart';
+import 'package:zproxy_client/services/app_services.dart';
 
 void main() {
-  runApp(const ZhihuProxyApp());
+  runApp(const ZProxyApp());
 }
 
-class ZhihuProxyApp extends StatefulWidget {
-  const ZhihuProxyApp({super.key});
+class ZProxyApp extends StatefulWidget {
+  const ZProxyApp({super.key});
 
   @override
-  State<ZhihuProxyApp> createState() => _ZhihuProxyAppState();
+  State<ZProxyApp> createState() => _ZProxyAppState();
 }
 
-class _ZhihuProxyAppState extends State<ZhihuProxyApp> {
+class _ZProxyAppState extends State<ZProxyApp> {
   final services = AppServices();
 
   @override

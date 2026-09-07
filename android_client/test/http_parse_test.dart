@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:zhihu_proxy_client/core/http_parse.dart';
+import 'package:zproxy_client/core/http_parse.dart';
 
 Stream<List<int>> streamOf(List<List<int>> chunks) => Stream.fromIterable(chunks);
 
