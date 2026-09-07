@@ -1,9 +1,9 @@
 {
   "client_port": 8787,
-  "server_host": "82.156.168.149",
+  "server_host": "1.2.3.4",
   "server_port": 8443,
-  "token": "54ZhengHF",
-  "mode": "all",
+  "token": "CHANGE_ME_SAME_AS_SERVER_PROXY_TOKEN",
+  "mode": "matched",
   "bypass": [
     "localhost",
     "127.0.0.1",
