@@ -94,6 +94,9 @@ void main() {
       token: _token,
       rules: ['*.example.com'],
       mode: 'matched',
+      // The relay only forwards DNS; point it at loopback so the roundtrip
+      // below (host 127.0.0.1) counts as DNS traffic.
+      dnsServer: '127.0.0.1',
     );
   });
 
@@ -193,7 +196,7 @@ void main() {
     }
   });
 
-  test('UDP ASSOCIATE -> granted with relay port; datagram roundtrip',
+  test('UDP ASSOCIATE -> granted with relay port; DNS datagram roundtrip',
       () async {
     final echo = await RawDatagramSocket.bind(
       InternetAddress.loopbackIPv4,

@@ -87,6 +87,22 @@ class AppServices extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    // Preflight: validate server reachability + token before bringing up the
+    // VPN, otherwise a wrong key would surface as a "running" tunnel with
+    // every connection silently dying server-side.
+    notifyListeners();
+    final pre = await probe(
+      serverHost: config.serverHost,
+      serverPort: config.serverPort,
+      token: config.token,
+    );
+    if (!pre.ok) {
+      lastError = '启动前校验未通过: ${pre.msg}';
+      _addLog('[probe] ${pre.msg}');
+      notifyListeners();
+      return;
+    }
+    _addLog('[probe] ${pre.msg}');
     try {
       final engine = ProxyEngine(
         serverHost: config.serverHost,

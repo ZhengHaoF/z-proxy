@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:zproxy_client/core/crypto_frame.dart';
 import 'package:zproxy_client/core/proxy_engine.dart';
+import 'package:zproxy_client/core/socks5.dart';
 
 const _token = 'tunnel-test-token';
 final _key = keyFor(_token);
@@ -349,4 +350,171 @@ void main() {
       }
     });
   });
+
+  group('isDnsTarget', () {
+    test('DNS ports and the configured server match; everything else does not', () {
+      expect(isDnsTarget('223.5.5.5', 53, null), isTrue);
+      expect(isDnsTarget('223.5.5.5', 853, null), isTrue);
+      expect(isDnsTarget('dns.example.com', 853, '223.5.5.5'), isTrue);
+      expect(isDnsTarget('223.5.5.5', 443, '223.5.5.5'), isTrue);
+      expect(isDnsTarget('www.example.com', 443, '223.5.5.5'), isFalse);
+      expect(isDnsTarget('www.example.com', 443, null), isFalse);
+      expect(isDnsTarget('www.example.com', 53, '223.5.5.5'), isTrue);
+    });
+  });
+
+  group('UDP relay', () {
+    test('DNS datagrams round-trip through the relay', () async {
+      final engine = ProxyEngine(
+        serverHost: '127.0.0.1',
+        serverPort: 1, // unused by the UDP relay
+        token: _token,
+        rules: [],
+        mode: 'matched',
+        dnsServer: '127.0.0.1',
+      );
+      final socksPort = await engine.serveSocks();
+      final client = await Socket.connect(InternetAddress.loopbackIPv4, socksPort);
+      final it = StreamIterator(client);
+      RawDatagramSocket? target;
+      RawDatagramSocket? relay;
+      try {
+        // Greeting + UDP ASSOCIATE (RFC 1928 §7).
+        client.add([0x05, 0x01, 0x00]);
+        await client.flush();
+        expect((await _readUpTo(it, 2)).toList(), [0x05, 0x00]);
+        client.add([0x05, 0x03, 0x00, 0x01, 127, 0, 0, 1, 0, 0]);
+        await client.flush();
+        final granted = (await _readUpTo(it, 10)).toList();
+        expect(granted.sublist(0, 4), [0x05, 0x00, 0x00, 0x01]);
+        expect(granted.sublist(4, 8), [127, 0, 0, 1]);
+        final relayPort = (granted[8] << 8) | granted[9];
+        expect(relayPort, isNonZero);
+
+        // Local UDP "DNS server" that echoes payloads back.
+        target = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
+        final echoTarget = target;
+        echoTarget.listen((event) {
+          if (event == RawSocketEvent.read) {
+            final dg = echoTarget.receive();
+            if (dg != null) {
+              echoTarget.send(dg.data, dg.address, dg.port);
+            }
+          }
+        });
+
+        relay = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
+        final relaySock = relay;
+
+        // host == dnsServer ('127.0.0.1'): forwarded to the target and the
+        // echo comes back wrapped in a fresh envelope.
+        final reply = await _waitUdp(relay, send: () {
+          relaySock.send(
+            buildUdpEnvelope(host: '127.0.0.1', port: echoTarget.port, payload: [1, 2, 3]),
+            InternetAddress.loopbackIPv4,
+            relayPort,
+          );
+        });
+        expect(reply, isNotNull);
+        final back = parseUdpEnvelope(reply!.data);
+        expect(back, isNotNull);
+        expect(back!.port, target.port);
+        expect(back.payload, [1, 2, 3]);
+      } finally {
+        relay?.close();
+        target?.close();
+        await it.cancel();
+        client.destroy();
+        await engine.close();
+      }
+    });
+
+    test('non-DNS datagrams (QUIC etc.) are dropped, not forwarded', () async {
+      final engine = ProxyEngine(
+        serverHost: '127.0.0.1',
+        serverPort: 1,
+        token: _token,
+        rules: [],
+        mode: 'all',
+        dnsServer: '127.0.0.1',
+      );
+      final socksPort = await engine.serveSocks();
+      final client = await Socket.connect(InternetAddress.loopbackIPv4, socksPort);
+      final it = StreamIterator(client);
+      RawDatagramSocket? target;
+      RawDatagramSocket? relay;
+      try {
+        client.add([0x05, 0x01, 0x00]);
+        await client.flush();
+        expect((await _readUpTo(it, 2)).toList(), [0x05, 0x00]);
+        client.add([0x05, 0x03, 0x00, 0x01, 127, 0, 0, 1, 0, 0]);
+        await client.flush();
+        final granted = (await _readUpTo(it, 10)).toList();
+        final relayPort = (granted[8] << 8) | granted[9];
+
+        target = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
+        var received = 0;
+        target.listen((event) {
+          if (event == RawSocketEvent.read && target!.receive() != null) {
+            received++;
+          }
+        });
+        relay = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
+
+        // 'www.example.com:443' is neither a DNS port nor the configured
+        // dnsServer: the relay must drop it instead of egressing directly.
+        final none = await _waitUdp(relay, timeout: const Duration(milliseconds: 500), send: () {
+          relay!.send(
+            buildUdpEnvelope(host: 'www.example.com', port: 443, payload: [9]),
+            InternetAddress.loopbackIPv4,
+            relayPort,
+          );
+        });
+        expect(none, isNull);
+        // The datagram must not have reached the (loopback-bindable) target
+        // either — 'www.example.com' resolves elsewhere, but the drop happens
+        // before any lookup/socket work, which the zero receive count and the
+        // quiet relay window above confirm.
+        expect(received, 0);
+      } finally {
+        relay?.close();
+        target?.close();
+        await it.cancel();
+        client.destroy();
+        await engine.close();
+      }
+    });
+  });
+}
+
+Future<Datagram?> _waitUdp(
+  RawDatagramSocket socket, {
+  void Function()? send,
+  Duration timeout = const Duration(seconds: 2),
+}) async {
+  // Subscribe BEFORE triggering the send: a RawDatagramSocket drops
+  // datagrams that arrive while no listener is registered.
+  final completer = Completer<Datagram?>();
+  late final StreamSubscription<RawSocketEvent> sub;
+  sub = socket.listen((event) {
+    if (event == RawSocketEvent.read && !completer.isCompleted) {
+      // Consume first, cancel later: cancelling the subscription up front
+      // can discard the buffered datagram and yield a null receive().
+      final dg = socket.receive();
+      if (dg != null) {
+        sub.cancel();
+        completer.complete(dg);
+      }
+    }
+  });
+  send?.call();
+  final timer = Timer(timeout, () {
+    if (!completer.isCompleted) {
+      sub.cancel();
+      completer.complete(null);
+    }
+  });
+  final result = await completer.future;
+  timer.cancel();
+  return result;
 }

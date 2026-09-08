@@ -72,6 +72,19 @@ class AppPlugin :
         stateChannel.setStreamHandler(null)
         VpnService.stateListener = null
         stateSink = null
+        // The Dart-side SOCKS engine dies together with this engine; without
+        // it the tunnel would silently blackhole. Stop the VPN right away —
+        // the service-side watchdog is only the slower fallback for cases
+        // where the engine dies without detaching (isolate crash).
+        val app = application ?: return
+        if (VpnService.isRunning) {
+            try {
+                ServiceController.stop(app)
+            } catch (_: Exception) {
+                // Background service-start restrictions etc.; the watchdog
+                // will tear the tunnel down shortly after.
+            }
+        }
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {

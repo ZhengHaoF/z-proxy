@@ -48,6 +48,11 @@ class VpnService : SystemVpnService() {
         // devices/emulators and cause dropped packets behind the tunnel.
         const val MTU = 1500
 
+        /** Engine watchdog: probe interval and failures before teardown. */
+        private const val WATCHDOG_INTERVAL_MS = 5000L
+        private const val ENGINE_MAX_FAILURES = 3
+        private const val WATCHDOG_CONNECT_TIMEOUT_MS = 2000
+
         @Volatile
         var isRunning = false
             private set
@@ -67,6 +72,20 @@ class VpnService : SystemVpnService() {
 
     private var tunFd: ParcelFileDescriptor? = null
     private var starting = false
+
+    /**
+     * Session generation: bumped by every [startTun] and [stopTun]. The
+     * async start path captures its generation and aborts if it no longer
+     * matches — otherwise a stop issued while the tun was still being
+     * established would be overwritten when the start path completed
+     * ("resurrected" tunnel after the user pressed stop).
+     */
+    @Volatile
+    private var generation = 0
+
+    /** Consecutive watchdog failures; guarded by the main handler. */
+    private var engineFailures = 0
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var networkWatch: NetworkObserveModule
 
@@ -142,7 +161,8 @@ class VpnService : SystemVpnService() {
             return
         }
         starting = true
-        Log.i(TAG, "startTun: socksPort=$socksPort")
+        val gen = ++generation
+        Log.i(TAG, "startTun: socksPort=$socksPort gen=$gen")
         startForeground(connecting = true)
         Thread {
             try {
@@ -152,10 +172,29 @@ class VpnService : SystemVpnService() {
                     postTunFailure("establish rejected")
                     return@Thread
                 }
+                if (gen != generation) {
+                    // stopTun()/restartTun() ran while the tun was being
+                    // established: discard the session instead of letting it
+                    // resurrect after the user pressed stop.
+                    Log.i(TAG, "startTun aborted: generation changed ($gen != $generation)")
+                    starting = false
+                    fd.close()
+                    return@Thread
+                }
                 tunFd = fd
                 Log.i(TAG, "tun established fd=${fd.fd}")
                 val started = Tun2Socks.start(fd = fd.fd, socksPort = socksPort, mtu = MTU)
                 Log.i(TAG, "engine launched=$started")
+                if (gen != generation) {
+                    // Stopped (or restarted) while the engine was spinning up.
+                    // The engine owns the fd once started, so only Tun2Socks
+                    // may release it in that case (fdsan aborts on double-close).
+                    if (started) Tun2Socks.stop() else fd.close()
+                    tunFd = null
+                    starting = false
+                    Log.i(TAG, "startTun aborted after engine start: generation changed")
+                    return@Thread
+                }
                 if (!started) {
                     fd.close()
                     tunFd = null
@@ -172,6 +211,7 @@ class VpnService : SystemVpnService() {
                     startForeground(connecting = false)
                     Log.i(TAG, "vpn running")
                     stateListener?.invoke(true)
+                    scheduleEngineWatchdog()
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "startTun failed", t)
@@ -197,6 +237,7 @@ class VpnService : SystemVpnService() {
 
     /** Tears down tun2socks and the tun device; the service itself stays up. */
     fun stopTun() {
+        generation++ // invalidate any in-flight startTun
         starting = false
         if (!isRunning && tunFd == null) {
             return
@@ -212,6 +253,57 @@ class VpnService : SystemVpnService() {
     private fun restartTun() {
         stopTun()
         startTun()
+    }
+
+    // ---- Engine watchdog ----
+
+    /**
+     * Periodically verifies the Dart-side SOCKS engine still accepts
+     * connections. The engine lives in the Flutter isolate, so it can
+     * disappear (activity destroyed, isolate crash) while this foreground
+     * service keeps the tunnel up — traffic would silently blackhole.
+     * After [ENGINE_MAX_FAILURES] consecutive probes fail the tunnel is
+     * torn down and the state change reported.
+     */
+    private fun scheduleEngineWatchdog() {
+        mainHandler.postDelayed({ checkEngineAlive() }, WATCHDOG_INTERVAL_MS)
+    }
+
+    private fun checkEngineAlive() {
+        if (!isRunning || socksPort <= 0) {
+            return
+        }
+        val port = socksPort
+        Thread {
+            val alive = try {
+                java.net.Socket().use {
+                    it.connect(java.net.InetSocketAddress("127.0.0.1", port), WATCHDOG_CONNECT_TIMEOUT_MS)
+                    true
+                }
+            } catch (_: Exception) {
+                false
+            }
+            runOnMain {
+                if (!isRunning) {
+                    return@runOnMain
+                }
+                if (alive) {
+                    engineFailures = 0
+                    scheduleEngineWatchdog()
+                    return@runOnMain
+                }
+                engineFailures++
+                Log.w(TAG, "watchdog: socks port $port unreachable (failures=$engineFailures)")
+                if (engineFailures < ENGINE_MAX_FAILURES) {
+                    scheduleEngineWatchdog()
+                    return@runOnMain
+                }
+                Log.e(TAG, "watchdog: engine dead, stopping tunnel")
+                stopTun()
+                stopSelf()
+                stateListener?.invoke(false)
+            }
+        }.apply { name = "vpn-watchdog"; start() }
     }
 
     private fun establishTun(): ParcelFileDescriptor? {
@@ -231,9 +323,15 @@ class VpnService : SystemVpnService() {
         // Bind the tunnel to the current physical network. Without an
         // underlying network the VPN may not become the default network on
         // Android 12+ (traffic keeps egressing over the physical interface).
+        // TRANSPORT_VPN networks must be excluded: `allNetworks` contains
+        // this VPN itself, and selecting it as underlying would loop traffic.
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         val underlying = cm?.allNetworks
-            ?.firstOrNull { cm.getNetworkCapabilities(it)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true }
+            ?.firstOrNull {
+                val caps = cm.getNetworkCapabilities(it)
+                caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true &&
+                    !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+            }
         if (underlying != null) {
             builder.setUnderlyingNetworks(arrayOf(underlying))
         }

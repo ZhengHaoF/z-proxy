@@ -15,6 +15,18 @@ typedef _ReplyOnRejected =
     Future<void> Function(Socket client, int? code, String? reason);
 typedef _ReplyOnEstablished = Future<void> Function(Socket client);
 
+/// Whether a target is DNS traffic (DoT/DoQ ports count, plus an exact
+/// match against the configured VPN DNS server).
+///
+/// Used to decide CONNECT routing and — for UDP — whether the relay may
+/// forward a datagram at all.
+bool isDnsTarget(String host, int port, String? dnsServer) {
+  if (port == 53 || port == 853) {
+    return true;
+  }
+  return dnsServer != null && dnsServer.isNotEmpty && host == dnsServer;
+}
+
 /// Local HTTP proxy engine, port of `client/proxy_client.py` (L352-537).
 ///
 /// Listens on a loopback port and consumes HTTP proxy requests (CONNECT or
@@ -150,9 +162,7 @@ class ProxyEngine {
         await _replyAndClose(client, const [0x05, socksCommandNotSupported]);
         return;
       }
-      final isDns = req.port == 53 ||
-          req.port == 853 ||
-          (dnsServer != null && dnsServer!.isNotEmpty && req.host == dnsServer);
+      final isDns = isDnsTarget(req.host, req.port, dnsServer);
       final via = !isDns &&
           useServer(req.host, rules: rules, mode: mode, bypass: bypass);
       _logRequest(via ? 'TUNNEL' : 'DIRECT', '${req.host}:${req.port}');
@@ -231,6 +241,14 @@ class ProxyEngine {
         }
         final env = parseUdpEnvelope(dg.data);
         if (env == null) {
+          return;
+        }
+        if (!isDnsTarget(env.host, env.port, dnsServer)) {
+          // Non-DNS UDP (e.g. QUIC/HTTP3 on port 443) cannot be routed
+          // through the encrypted tunnel, and this process is excluded from
+          // the VPN — forwarding it would bypass the tunnel and the rules
+          // entirely. Drop it so clients fall back to TCP, which honors the
+          // rules; system DNS keeps working through the relay.
           return;
         }
         unawaited(_udpForward(relay, dg, env, sessions));

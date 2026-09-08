@@ -1,66 +1,22 @@
 package io.zproxy.zproxy_client.service
 
-import android.util.Log
-
 /**
- * In-process tun2socks engine (Go shared library `libtun2socks.so`, built
- * from xjasonlyu/tun2socks v2.7.0 with a thin JNI wrapper).
+ * Public facade for the in-process tun2socks engine.
  *
- * The engine runs inside this process, so the TUN fd is passed as a plain
- * integer argument — Android close-inherited-fds child processes, which is
- * why a subprocess approach cannot work here.
+ * All native work is delegated to the legacy-named bridge
+ * (`io.zhihuproxy.zhihu_proxy_client.service.Tun2Socks`) whose fully
+ * qualified class name is baked into the prebuilt `libtun2socks.so` JNI
+ * symbols. See the bridge class for details.
  */
 object Tun2Socks {
-    private const val TAG = "Tun2Socks"
-
-    init {
-        System.loadLibrary("tun2socks")
-    }
-
-    @Volatile
-    private var running = false
+    private val engine = io.zhihuproxy.zhihu_proxy_client.service.Tun2Socks
 
     val isRunning: Boolean
-        get() = running
-
-    private external fun nativeStart(
-        fd: Int,
-        proxy: String,
-        mtu: Int,
-        logLevel: String,
-    ): Int
-
-    private external fun nativeStop(): Int
+        get() = engine.isRunning
 
     /** Starts the engine with the given tun [fd]; returns `false` on failure. */
-    fun start(fd: Int, socksPort: Int, mtu: Int): Boolean {
-        stop()
-        Log.i(TAG, "engine start fd=$fd socksPort=$socksPort mtu=$mtu")
-        val code = try {
-            nativeStart(fd, "socks5://127.0.0.1:$socksPort", mtu, "info")
-        } catch (t: Throwable) {
-            Log.e(TAG, "engine start failed", t)
-            return false
-        }
-        running = code == 0
-        if (running) {
-            Log.i(TAG, "engine started: socks5://127.0.0.1:$socksPort")
-        } else {
-            Log.e(TAG, "engine start returned code=$code")
-        }
-        return running
-    }
+    fun start(fd: Int, socksPort: Int, mtu: Int): Boolean = engine.start(fd, socksPort, mtu)
 
     /** Stops the engine (idempotent). */
-    fun stop() {
-        if (!running) {
-            return
-        }
-        running = false
-        try {
-            nativeStop()
-        } catch (t: Throwable) {
-            Log.e(TAG, "engine stop failed", t)
-        }
-    }
+    fun stop() = engine.stop()
 }
