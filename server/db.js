@@ -88,4 +88,9 @@ function get() {
   return db;
 }
 
-module.exports = { init, get, cleanup, DB_PATH, DATA_DIR };
+function close() {
+  if (db) db.close();
+  db = null;
+}
+
+module.exports = { init, get, cleanup, close, DB_PATH, DATA_DIR };

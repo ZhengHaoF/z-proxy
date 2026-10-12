@@ -1,326 +1,419 @@
 'use strict';
 
-/**
- * Traffic-forward server (Node.js 22, no external deps).
- *
- * 加密帧协议（客户端↔服务端）：
- *   每条连接以「一个加密帧」开始（目标域名、请求头都加密，链路上看不到任何域名）：
- *     magic(0x5A) | len(4B BE) | nonce(16B) | ciphertext(len) | tag(32B)
- *   加密：密钥流 = HMAC-SHA256(enc_key, nonce || counter32)；ciphertext = payload XOR 密钥流
- *   鉴权：tag = HMAC-SHA256(enc_key, nonce || ciphertext)，验 tag 即验 token
- *   密钥：enc_key = HMAC-SHA256(PROXY_TOKEN, "z-proxy:enc:v1")
- *   载荷为 JSON：
- *     {m:"CONNECT", t:"host:port"}                  → HTTPS 隧道（服务端 DNS+直连，ACK 后透传）
- *     {m:"HTTP", r:"GET http://.. HTTP/1.1", h:{}}  → 普通 HTTP 转发（服务端 http.request）
- *   应答帧（仅 CONNECT 模式）：{m:"OK/错误信息", c:200|407|502|400}
- *
- * Usage:
- *   PORT=8443 PROXY_TOKEN=your-secret node server.js
- */
-
+// Only the first control frame is encrypted. Payload traffic is not wrapped
+// in TLS by this transport; never describe this as a fully encrypted tunnel.
 const net = require('net');
-const dns = require('dns').promises;
 const http = require('http');
-const crypto = require('crypto');
-
-require('./lib/env').load(); // .env → process.env（须在读取任何配置之前）
-require('./lib/log').install(); // 拦截 console → 环形缓冲 + SQLite 落库（须最先 require）
+const { readConfig } = require('./lib/config');
+const { MAGIC, MAX_PAYLOAD, HEADER_LEN, TAG_LEN, keyFor, encryptFrame, decryptFrame } = require('./lib/frame');
 const metrics = require('./metrics');
 const admin = require('./admin_server');
+const { resolveAddresses, grace } = require('./lib/resolve');
 
-const sockets = new Map(); // connId -> { client, target }（供管理面强制断开）
-
-const PORT = parseInt(process.env.PORT || '8443', 10);
-const HOST = process.env.HOST || '0.0.0.0';
-const SECRET = process.env.PROXY_TOKEN || 'z-proxy-dev';
-const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '0', 10); // seconds, 0 = off
-const DNS_TIMEOUT_MS = 5000;
-const MAGIC = 0x5a;
-const ENC_CTX = 'z-proxy:enc:v1';
-
-function encKey() {
-  return crypto.createHmac('sha256', SECRET).update(ENC_CTX).digest();
-}
-
-function keystream(key, nonce, length) {
-  const chunks = [];
-  let produced = 0;
-  let counter = 0;
-  while (produced < length) {
-    const ctr = Buffer.from([
-      (counter >>> 24) & 0xff, (counter >>> 16) & 0xff,
-      (counter >>> 8) & 0xff, counter & 0xff,
-    ]);
-    chunks.push(crypto.createHmac('sha256', key).update(Buffer.concat([nonce, ctr])).digest());
-    produced += 32;
-    counter += 1;
-  }
-  return Buffer.concat(chunks).subarray(0, length);
-}
-
-function encryptFrame(payload) {
-  const key = encKey();
-  const nonce = crypto.randomBytes(16);
-  const ks = keystream(key, nonce, payload.length);
-  const ct = Buffer.alloc(payload.length);
-  for (let i = 0; i < payload.length; i++) ct[i] = payload[i] ^ ks[i];
-  const tag = crypto.createHmac('sha256', key).update(Buffer.concat([nonce, ct])).digest();
-  const head = Buffer.alloc(21);
-  head[0] = MAGIC;
-  head.writeUInt32BE(ct.length, 1);
-  nonce.copy(head, 5);
-  return Buffer.concat([head, ct, tag]);
-}
-
-/** Returns plaintext Buffer, or null if malformed / bad tag (i.e. auth failed). */
-function decryptFrame(frame) {
-  if (!frame || frame.length < 21 || frame[0] !== MAGIC) return null;
-  const n = frame.readUInt32BE(1);
-  if (n > 65536 || frame.length !== 21 + n + 32) return null;
-  const nonce = frame.subarray(5, 21);
-  const ct = frame.subarray(21, 21 + n);
-  const tag = frame.subarray(21 + n);
-  const key = encKey();
-  const expect = crypto.createHmac('sha256', key).update(Buffer.concat([nonce, ct])).digest();
-  if (tag.length !== expect.length || !crypto.timingSafeEqual(tag, expect)) return null;
-  const ks = keystream(key, nonce, ct.length);
-  const pt = Buffer.alloc(ct.length);
-  for (let i = 0; i < ct.length; i++) pt[i] = ct[i] ^ ks[i];
-  return pt;
-}
-
-function sendAck(socket, code, msg) {
-  try {
-    socket.write(encryptFrame(Buffer.from(JSON.stringify({ m: msg, c: code }))));
-  } catch (_) {}
-}
-
-function deny(socket, code, msg) {
-  metrics.deny(code);
-  sendAck(socket, code, msg);
-  socket.destroy();
-}
-
-// ---- 连接处理：每连接一个加密帧 + 后续原始双向流 ----
-const server = net.createServer((clientSocket) => {
-  clientSocket.on('error', () => {});
-
-  let buf = Buffer.alloc(0);
-  const onData = (chunk) => {
-    buf = Buffer.concat([buf, chunk]);
-    if (buf.length > 21 + 65536 + 32) {
-      // 迟迟等不到合法帧：直接掐掉
-      clientSocket.destroy();
-      return;
-    }
-    if (buf.length < 21) return;
-    const n = buf.readUInt32BE(1);
-    if (n > 65536 || buf.length < 21 + n + 32) return;
-    clientSocket.removeListener('data', onData);
-    const frame = buf.subarray(0, 21 + n + 32);
-    const leftover = buf.subarray(21 + n + 32);
-    buf = null;
-
-    const pt = decryptFrame(frame);
-    if (!pt) {
-      console.warn('[auth] rejected: bad magic/tag');
-      deny(clientSocket, 407, 'Proxy Authentication Required');
-      return;
-    }
-    let info;
-    try { info = JSON.parse(pt.toString('utf8')); } catch (_) {
-      deny(clientSocket, 400, 'Bad Request');
-      return;
-    }
-    // V3: 可选字段 c（client_id），旧客户端不带则 null，向后兼容
-    const clientId = (typeof info.c === 'string' && info.c.length <= 64) ? info.c : null;
-    if (info.m === 'CONNECT') handleConnect(clientSocket, info.t, leftover, clientId);
-    else if (info.m === 'HTTP') handleHttp(clientSocket, info, leftover, clientId);
-    else deny(clientSocket, 400, 'Bad Request');
-  };
-  clientSocket.on('data', onData);
-});
-
-// ---- HTTPS 隧道（CONNECT）----
-function handleConnect(clientSocket, target, leftover, clientId) {
-  console.log(`[recv] CONNECT ${target}`);
-  const idx = (target || '').lastIndexOf(':');
-  let host = idx > 0 ? target.slice(0, idx) : target;
-  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
-  let port = idx > 0 ? parseInt(target.slice(idx + 1), 10) : 443;
-  if (!port) port = 443;
-
-  const connId = metrics.connOpen({ client_id: clientId, proto: 'CONNECT', target, host, port });
-  clientSocket.on('close', () => {
-    metrics.connClose(connId, 'closed');
-    sockets.delete(connId);
-  });
-
-  clientSocket.on('error', (e) => {
-    console.warn(`[connect] client socket error for ${target}: ${e.message}`);
-  });
-
-  // c-ares 的 resolve4/resolve6（getaddrinfo 会对超大 AAAA 集合的域名永久挂起，
-  // 例如 www.zhihu.com —— 那是上一版隧道的病根）
-  const resolveHost = async () => {
-    if (net.isIP(host)) return [host];
-    try {
-      const v4 = await dns.resolve4(host);
-      if (v4 && v4.length) return v4;
-    } catch (_) { /* fall through to AAAA */ }
-    try {
-      const v6 = await dns.resolve6(host);
-      if (v6 && v6.length) return v6;
-    } catch (_) { /* fall through */ }
-    throw new Error('no address resolved');
-  };
-
-  const dnsTimer = setTimeout(() => {
-    console.warn(`[connect] DNS timeout for ${host}:${port} (>${DNS_TIMEOUT_MS}ms) — giving up`);
-    metrics.connClose(connId, 'error');
-    deny(clientSocket, 502, 'Bad Gateway (DNS timeout)');
-  }, DNS_TIMEOUT_MS);
-
-  resolveHost().then((ips) => {
-    clearTimeout(dnsTimer);
-    let tried = 0;
-    let clientDead = false;
-    const tryNext = () => {
-      if (clientDead) return;
-      if (tried >= ips.length) {
-        console.warn(`[connect] all upstream IPs failed for ${host}:${port} (tried ${ips.join(',')})`);
-        metrics.connClose(connId, 'error');
-        deny(clientSocket, 502, 'Bad Gateway (upstream unreachable)');
-        return;
-      }
-      const ip = ips[tried++];
-      let settled = false;
-      const targetSocket = net.connect(port, ip, () => {
-        settled = true;
-        metrics.connUpgraded(connId, ip);
-        sendAck(clientSocket, 200, 'Connection Established');
-        if (leftover && leftover.length) targetSocket.write(leftover);
-        clientSocket.pipe(targetSocket);
-        targetSocket.pipe(clientSocket);
-        clientSocket.on('data', (d) => metrics.connBytes(connId, d.length, 0));
-        targetSocket.on('data', (d) => metrics.connBytes(connId, 0, d.length));
-        sockets.set(connId, { client: clientSocket, target: targetSocket });
-        if (IDLE_TIMEOUT) {
-          clientSocket.setTimeout(IDLE_TIMEOUT * 1000, () => { clientSocket.destroy(); targetSocket.destroy(); });
-        }
-        console.log(`[connect] ${host}:${port} -> ${ip}`);
-      });
-      targetSocket.on('error', (e) => {
-        if (settled) return; // error after pipe was established — ignore
-        settled = true;
-        console.warn(`[connect] upstream connect failed ${host}:${port} (${ip}): ${e.message}`);
-        try { targetSocket.destroy(); } catch (_) {}
-        tryNext();
-      });
-      clientSocket.on('error', () => {
-        clientDead = true;
-        try { targetSocket.destroy(); } catch (_) {}
-        if (!settled) {
-          settled = true;
-          console.warn(`[connect] client closed during connect to ${host}:${port} (${ip})`);
-        }
-      });
-    };
-    tryNext();
-  }).catch((e) => {
-    clearTimeout(dnsTimer);
-    console.warn(`[connect] DNS failed for ${host}: ${e.message}`);
-    metrics.connClose(connId, 'error');
-    deny(clientSocket, 502, 'Bad Gateway (DNS)');
-  });
-}
-
-// ---- 普通 HTTP 转发（http:// 目标）----
-function handleHttp(clientSocket, info, leftover, clientId) {
-  const r = (info.r || '').toString();
-  const h = info.h || {};
-  console.log(`[recv] HTTP ${r.split(' ')[1] || ''}`);
-  const parts = r.split(' ');
-  if (parts.length < 2) { deny(clientSocket, 400, 'Bad Request'); return; }
-  let target;
-  try { target = new URL(parts[1]); } catch (_) { deny(clientSocket, 400, 'Bad Request'); return; }
-  if (target.protocol !== 'http:') { deny(clientSocket, 400, 'Bad Request'); return; }
-
-  const connId = metrics.connOpen({ client_id: clientId, proto: 'HTTP', target: parts[1], host: target.hostname, port: target.port || 80 });
-  clientSocket.on('close', () => {
-    metrics.connClose(connId, 'closed');
-    sockets.delete(connId);
-  });
-  clientSocket.on('data', (d) => metrics.connBytes(connId, d.length, 0));
-
-  const headers = {};
-  for (const [k, v] of Object.entries(h)) {
-    if (['proxy-authorization', 'proxy-connection', 'proxy-authenticate', 'connection'].includes(k.toLowerCase())) continue;
-    headers[k] = v;
-  }
-  headers['connection'] = 'close';
-
-  const opts = {
-    hostname: target.hostname,
-    port: target.port || 80,
-    method: parts[0],
-    path: target.pathname + target.search,
-    headers,
-  };
-
-  const pReq = http.request(opts, (pRes) => {
-    pRes.on('data', (d) => metrics.connBytes(connId, 0, d.length));
-    pRes.pipe(clientSocket);
-  });
-  pReq.on('error', (e) => {
-    console.warn(`[http] upstream request failed for ${target.hostname}: ${e.message}`);
-    try { clientSocket.destroy(); } catch (_) {}
-  });
-
-  // 转发请求体：帧之后的字节都是 body（含 leftover 与后续流）。
-  // 按 Content-Length 计数结束请求；无 body 立即结束；chunked 退化为 socket 关闭时结束。
-  const chunked = /chunked/i.test(headers['transfer-encoding'] || '');
-  const cl = parseInt(headers['content-length'] || '', 10);
-  if (chunked) {
-    console.warn(`[http] chunked body from ${target.hostname} — relying on socket end`);
-    const fwd = (d) => { try { pReq.write(d); } catch (_) {} };
-    clientSocket.on('data', fwd);
-    clientSocket.on('end', () => { try { pReq.end(); } catch (_) {} });
-    if (leftover && leftover.length) pReq.write(leftover);
-  } else if (Number.isFinite(cl) && cl > 0) {
-    let sent = leftover ? leftover.length : 0;
-    const finish = () => {
-      clientSocket.removeListener('data', forward);
-      try { pReq.end(); } catch (_) {}
-    };
-    const forward = (d) => {
-      try { pReq.write(d); } catch (_) {}
-      sent += d.length;
-      if (sent >= cl) finish();
-    };
-    if (leftover && leftover.length) pReq.write(leftover);
-    if (sent >= cl) finish();
-    else {
-      clientSocket.on('data', forward);
-      clientSocket.on('end', () => { try { pReq.end(); } catch (_) {} });
-    }
+function parseTarget(target) {
+  if (typeof target !== 'string' || !target || /[\s/@?#\\]/.test(target)) throw new Error('invalid target');
+  let host;
+  let port = 443;
+  if (target.startsWith('[')) {
+    const match = /^\[([^\]]+)\](?::(\d+))?$/.exec(target);
+    if (!match || net.isIP(match[1]) !== 6) throw new Error('invalid IPv6 target');
+    host = match[1];
+    if (match[2]) port = Number(match[2]);
   } else {
-    // 无请求体（GET/HEAD/CL=0 等）：写完 leftover 立即结束请求
-    if (leftover && leftover.length) pReq.write(leftover);
-    try { pReq.end(); } catch (_) {}
+    const match = /^([^:]+)(?::(\d+))?$/.exec(target);
+    if (!match) throw new Error('invalid target');
+    host = match[1];
+    if (match[2]) port = Number(match[2]);
   }
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || host.length > 253) throw new Error('invalid target port/host');
+  return { host, port };
 }
 
-server.listen(PORT, HOST, () => {
-  console.log(`[server] encrypted forward proxy listening on ${HOST}:${PORT}`);
-  console.log(`[server] auth: encrypted frame (secret=${SECRET ? 'set' : 'off'})`);
-  metrics.start();
-  admin.start({
-    closeConn: (id) => {
-      const s = sockets.get(id);
-      if (!s) return false;
-      try { s.client.destroy(); if (s.target && s.target.destroy) s.target.destroy(); } catch (_) {}
-      return true;
-    },
+const HOP_HEADERS = new Set(['connection', 'proxy-connection', 'proxy-authorization',
+  'proxy-authenticate', 'keep-alive', 'te', 'trailer', 'transfer-encoding', 'upgrade']);
+function hopHeaders(headers) {
+  const names = new Set(HOP_HEADERS);
+  for (const name of String(headers.connection || '').split(',')) if (name.trim()) names.add(name.trim().toLowerCase());
+  return names;
+}
+
+function prepareHttp(info) {
+  if (typeof info.r !== 'string' || /[\r\n]/.test(info.r)) throw new Error('invalid request line');
+  const match = /^([!#$%&'*+.^_`|~0-9A-Za-z-]+) (\S+) HTTP\/1\.[01]$/.exec(info.r);
+  if (!match) throw new Error('invalid request line');
+  const target = new URL(match[2]);
+  if (target.protocol !== 'http:' || target.username || target.password || target.hash) throw new Error('invalid HTTP URL');
+  if (!info.h || typeof info.h !== 'object' || Array.isArray(info.h)) throw new Error('invalid headers');
+  const headers = Object.create(null);
+  for (const [name, value] of Object.entries(info.h)) {
+    if (typeof value !== 'string' || /[\r\n]/.test(value)) throw new Error('invalid header value');
+    http.validateHeaderName(name);
+    http.validateHeaderValue(name, value);
+    const lower = name.toLowerCase();
+    if (Object.hasOwn(headers, lower)) throw new Error('duplicate header name');
+    headers[lower] = value;
+  }
+  const cl = headers['content-length'];
+  const te = headers['transfer-encoding'];
+  if (cl !== undefined && (!/^\d+$/.test(cl) || !Number.isSafeInteger(Number(cl)))) throw new Error('invalid content-length');
+  if (te !== undefined && (te.trim().toLowerCase() !== 'chunked' || cl !== undefined)) throw new Error('unsupported framing');
+  if (headers.upgrade || headers.expect) throw new Error('upgrade/expect not supported in HTTP mode');
+  // Reconstruct framing once, then let Node's HTTP parser decode chunked/CL.
+  // Remove connection-nominated headers, but never remove framing metadata.
+  const remove = hopHeaders(headers);
+  remove.delete('content-length');
+  remove.delete('transfer-encoding');
+  const lines = [`${match[1]} ${target.pathname + target.search} HTTP/1.1`, `Host: ${target.host}`, 'Connection: close'];
+  for (const [name, value] of Object.entries(headers)) {
+    if (name !== 'host' && !remove.has(name)) lines.push(`${name}: ${value}`);
+  }
+  return { target, head: Buffer.from(lines.join('\r\n') + '\r\n\r\n', 'latin1') };
+}
+
+function createProxyServer(config = readConfig(), deps = {}) {
+  const key = keyFor(config.secret);
+  const registry = new Map();
+  const accepted = new Set();
+  const connect = deps.connect || net.connect;
+  function reject(socket, code, message) {
+    metrics.deny(code);
+    if (socket.destroyed) return;
+    socket.end(encryptFrame(Buffer.from(JSON.stringify({ m: message, c: code })), key));
+    const timer = setTimeout(() => socket.destroy(), 1000);
+    timer.unref();
+    socket.once('close', () => clearTimeout(timer));
+  }
+  function session(socket, id) {
+    let resource = null;
+    let closed = false;
+    let status = 'closed';
+    const timers = new Set();
+    const cleanups = new Set();
+    const finish = () => {
+      if (closed) return;
+      closed = true;
+      for (const timer of timers) clearTimeout(timer);
+      for (const cleanup of cleanups) cleanup();
+      cleanups.clear();
+      if (resource) resource.destroy();
+      registry.delete(id);
+      metrics.connClose(id, status);
+    };
+    socket.once('close', finish);
+    socket.once('error', () => { status = 'error'; finish(); });
+    const ctx = {
+      get dead() { return closed || socket.destroyed; },
+      attach(value) {
+        if (ctx.dead) { value.destroy(); return false; }
+        resource = value;
+        registry.set(id, { client: socket, target: value });
+        return true;
+      },
+      timer(fn, ms) {
+        const t = setTimeout(() => { timers.delete(t); if (!ctx.dead) fn(); }, ms);
+        timers.add(t);
+        t.unref();
+        return t;
+      },
+      clear(t) { clearTimeout(t); timers.delete(t); },
+      cleanup(fn) {
+        if (ctx.dead) { fn(); return; }
+        cleanups.add(fn);
+      },
+      fail(code, msg) {
+        status = 'error';
+        finish();
+        reject(socket, code, msg);
+      },
+      abort() { status = 'error'; socket.destroy(); finish(); },
+    };
+    registry.set(id, { client: socket, target: null });
+    return ctx;
+  }
+
+  // Node's requestTimeout is an absolute request-body deadline. Disable it:
+  // upload inactivity and response first-byte deadlines are managed below.
+  const httpParser = http.createServer({ maxHeaderSize: MAX_PAYLOAD, requestTimeout: 0 }, (req, res) => {
+    const socket = req.socket;
+    const ctx = socket._proxyContext;
+    const id = socket._proxyId;
+    if (!ctx || ctx.dead || socket._proxyRequestSeen) { res.writeHead(400); res.end(); return; }
+    socket._proxyRequestSeen = true;
+    const target = socket._proxyHttpTarget;
+    const remove = hopHeaders(req.headers);
+    const headers = Object.create(null);
+    for (const [name, value] of Object.entries(req.headers)) {
+      if (!remove.has(name)) headers[name] = value;
+    }
+    headers.host = target.host;
+    headers.connection = 'close';
+    // Node does not automatically choose chunked framing for GET/DELETE.
+    // IncomingMessage is decoded, so explicitly request fresh body framing.
+    if (req.headers['transfer-encoding']) headers['transfer-encoding'] = 'chunked';
+    if (req.headers['content-length']) headers['content-length'] = req.headers['content-length'];
+    let responseStarted = false;
+    let upstreamSocket;
+    let responseTimer;
+    const timedOut = () => {
+      upstream.destroy();
+      if (!responseStarted && !res.headersSent) {
+        res.writeHead(504);
+        res.end('Gateway Timeout');
+      } else ctx.abort();
+    };
+    const resetResponseTimer = () => {
+      ctx.clear(responseTimer);
+      if (!responseStarted) responseTimer = ctx.timer(timedOut, config.httpTimeoutMs);
+    };
+    // Uploads have an inactivity budget, not a total duration cap. After the
+    // request ends, this same timer measures the response first-byte deadline.
+    resetResponseTimer();
+    const lookup = deps.lookup || ((host, options, callback) => {
+      const query = resolveAddresses(host, config.dnsTimeoutMs, deps.dns);
+      ctx.cleanup(() => query.cancel());
+      query.balanced().then((ips) => {
+        query.cancel();
+        if (ctx.dead) { callback(new Error('request cancelled')); return; }
+        if (options.all) callback(null, ips.map(address => ({ address, family: net.isIP(address) })));
+        else callback(null, ips[0], net.isIP(ips[0]));
+      }, () => callback(new Error('DNS failed or timed out')));
+    });
+    const upstream = http.request({
+      hostname: target.hostname.replace(/^\[|\]$/g, ''),
+      port: target.port || 80, method: req.method,
+      path: target.pathname + target.search, headers, lookup, agent: false,
+    }, (response) => {
+      responseStarted = true;
+      ctx.clear(responseTimer);
+      if (config.idleTimeoutMs) {
+        socket.setTimeout(config.idleTimeoutMs, () => ctx.abort());
+        if (upstreamSocket) upstreamSocket.setTimeout(config.idleTimeoutMs, () => ctx.abort());
+      }
+      // rawHeaders preserves repeated Set-Cookie. Node writes fresh response
+      // framing because IncomingMessage has already decoded chunk boundaries.
+      const drop = hopHeaders(response.headers);
+      const out = [];
+      for (let i = 0; i < response.rawHeaders.length; i += 2) {
+        const name = response.rawHeaders[i];
+        if (!drop.has(name.toLowerCase())) out.push(name, response.rawHeaders[i + 1]);
+      }
+      out.push('Connection', 'close');
+      res.writeHead(response.statusCode, response.statusMessage, out);
+      response.on('data', d => metrics.connBytes(id, 0, d.length));
+      response.on('error', () => ctx.abort());
+      response.once('aborted', () => ctx.abort());
+      response.pipe(res);
+    });
+    if (!ctx.attach(upstream)) return;
+    upstream.on('socket', s => {
+      upstreamSocket = s;
+      const connectTimer = ctx.timer(() => upstream.destroy(new Error('Connect timeout')), config.connectTimeoutMs);
+      s.once('connect', () => {
+        ctx.clear(connectTimer);
+        metrics.connUpgraded(id, s.remoteAddress);
+      });
+      s.once('close', () => ctx.clear(connectTimer));
+    });
+    upstream.on('error', () => {
+      if (res.writableEnded) return;
+      if (!ctx.dead && !responseStarted && !res.headersSent) { res.writeHead(502); res.end('Bad Gateway'); }
+      else socket.destroy();
+    });
+    req.once('aborted', () => ctx.abort());
+    req.once('error', () => ctx.abort());
+    res.once('finish', () => ctx.clear(responseTimer));
+    res.once('error', () => ctx.abort());
+    req.on('data', d => {
+      metrics.connBytes(id, d.length, 0);
+      resetResponseTimer();
+    });
+    req.once('end', resetResponseTimer);
+    req.pipe(upstream); // Built-in parser handles CL, chunked, and backpressure.
   });
-});
+  httpParser.httpAllowHalfOpen = true;
+  httpParser.maxRequestsPerSocket = 1;
+  httpParser.on('clientError', (_err, socket) => {
+    if (!socket.destroyed) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+  });
+  httpParser.on('connect', (_req, socket) => socket.destroy());
+  httpParser.on('upgrade', (_req, socket) => socket.destroy());
+
+  async function handleConnect(socket, target, leftover, clientId) {
+    const { host, port } = parseTarget(target);
+    const id = metrics.connOpen({ client_id: clientId, proto: 'CONNECT', target, host, port });
+    const ctx = session(socket, id);
+    const setup = ctx.timer(() => ctx.fail(502, 'Setup timeout'), config.setupTimeoutMs);
+    const query = resolveAddresses(host, config.dnsTimeoutMs, deps.dns);
+    ctx.cleanup(() => query.cancel());
+    let ips;
+    let firstIndex;
+    try {
+      const first = await query.first;
+      ips = first.ips;
+      firstIndex = first.index;
+    } catch (_) { ips = []; }
+    if (ctx.dead) return;
+    if (!ips.length) { ctx.fail(502, 'DNS failed'); return; }
+    // Begin with the fast family; if it cannot connect, use the other family
+    // once it resolves (its independent timeout caps this wait).
+    const attempts = async function* () {
+      const firstQueue = ips.slice();
+      if (query.tasks.length < 2) { yield* firstQueue; return; }
+      let otherQueue = null;
+      const waiting = query.tasks[1 - firstIndex].then(value => { otherQueue = value.slice(); return value; });
+      if (firstQueue.length) yield firstQueue.shift();
+      await grace(waiting);
+      while (firstQueue.length || (otherQueue && otherQueue.length)) {
+        // Do not exhaust a whole failing family before trying its peer.
+        if (otherQueue && otherQueue.length) yield otherQueue.shift();
+        if (firstQueue.length) yield firstQueue.shift();
+      }
+      if (otherQueue === null) yield* await waiting;
+    };
+    for await (const ip of attempts()) {
+      if (ctx.dead) return;
+      let targetSocket;
+      const connected = await new Promise(resolve => {
+        let settled = false;
+        let attempt;
+        const done = ok => {
+          if (settled) return;
+          settled = true;
+          ctx.clear(attempt);
+          resolve(ok);
+        };
+        try {
+          targetSocket = connect({ host: ip, port, allowHalfOpen: true });
+          if (!ctx.attach(targetSocket)) { done(false); return; }
+          attempt = ctx.timer(() => { targetSocket.destroy(); done(false); }, config.connectTimeoutMs);
+          targetSocket.once('connect', () => done(true));
+          targetSocket.once('error', () => done(false));
+          targetSocket.once('close', () => done(false));
+        } catch (_) { done(false); }
+      });
+      if (ctx.dead) return;
+      if (!connected) { if (targetSocket) targetSocket.destroy(); continue; }
+      ctx.clear(setup);
+      query.cancel();
+      metrics.connUpgraded(id, ip);
+      targetSocket.on('error', () => ctx.abort());
+      targetSocket.on('close', () => {
+        if (socket.destroyed) return;
+        if (!targetSocket.readableEnded) socket.destroy();
+        else if (!socket.writableEnded) socket.end();
+      });
+      if (config.idleTimeoutMs) {
+        socket.setTimeout(config.idleTimeoutMs, () => ctx.abort());
+        targetSocket.setTimeout(config.idleTimeoutMs, () => ctx.abort());
+      }
+      socket.write(encryptFrame(Buffer.from(JSON.stringify({ m: 'Connection Established', c: 200 })), key));
+      if (leftover.length) {
+        metrics.connBytes(id, leftover.length, 0);
+        if (!targetSocket.write(leftover)) await new Promise(resolve => {
+          targetSocket.once('drain', resolve);
+          targetSocket.once('close', resolve);
+        });
+      }
+      if (ctx.dead) return;
+      socket.on('data', d => metrics.connBytes(id, d.length, 0));
+      targetSocket.on('data', d => metrics.connBytes(id, 0, d.length));
+      socket.pipe(targetSocket);
+      targetSocket.pipe(socket);
+      socket.resume();
+      return;
+    }
+    if (!ctx.dead) ctx.fail(502, 'Upstream unreachable');
+  }
+
+  const server = net.createServer({ allowHalfOpen: true }, (socket) => {
+    if (accepted.size >= config.maxConnections) { socket.destroy(); return; }
+    accepted.add(socket);
+    socket.on('error', () => {});
+    socket.once('close', () => accepted.delete(socket));
+    const timer = setTimeout(() => socket.destroy(), config.handshakeTimeoutMs);
+    timer.unref();
+    socket.once('close', () => clearTimeout(timer));
+    let buf = Buffer.alloc(0);
+    socket.once('end', () => { if (buf !== null) socket.destroy(); });
+    const onData = chunk => {
+      buf = Buffer.concat([buf, chunk]);
+      if (buf[0] !== MAGIC) { socket.destroy(); return; }
+      if (buf.length < 5) return;
+      const n = buf.readUInt32BE(1);
+      if (n > MAX_PAYLOAD) { socket.destroy(); return; }
+      const total = HEADER_LEN + n + TAG_LEN;
+      if (buf.length < total) return;
+      clearTimeout(timer);
+      socket.pause(); // Preserve bytes arriving while DNS/connect runs.
+      socket.removeListener('data', onData);
+      const pt = decryptFrame(buf.subarray(0, total), key);
+      const leftover = buf.subarray(total);
+      buf = null;
+      if (!pt) { reject(socket, 407, 'Authentication failed'); return; }
+      let info;
+      try {
+        info = JSON.parse(pt.toString('utf8'));
+        if (!info || typeof info !== 'object' || Array.isArray(info)) throw new Error('invalid object');
+        const clientId = typeof info.c === 'string' && info.c.length <= 64 ? info.c : null;
+        if (info.m === 'CONNECT') {
+          parseTarget(info.t);
+          handleConnect(socket, info.t, leftover, clientId).catch(() => socket.destroy());
+        } else if (info.m === 'HTTP') {
+          const { target, head } = prepareHttp(info);
+          const id = metrics.connOpen({ client_id: clientId, proto: 'HTTP', target: target.href,
+            host: target.hostname, port: Number(target.port || 80) });
+          socket._proxyId = id;
+          socket._proxyContext = session(socket, id);
+          socket._proxyHttpTarget = target;
+          // Upload inactivity / first-byte deadlines are managed by the HTTP
+          // handler. A competing socket timer could destroy a pending 504.
+          socket.setTimeout(0);
+          socket.unshift(Buffer.concat([head, leftover]));
+          httpParser.emit('connection', socket);
+          socket.resume();
+        } else throw new Error('unsupported method');
+      } catch (_) { reject(socket, 400, 'Bad Request'); }
+    };
+    socket.on('data', onData);
+  });
+  server.closeConn = id => {
+    const pair = registry.get(id);
+    if (!pair) return false;
+    pair.client.destroy();
+    if (pair.target) pair.target.destroy();
+    return true;
+  };
+  server.shutdown = () => {
+    for (const socket of accepted) socket.destroy();
+    return new Promise(resolve => server.close(resolve));
+  };
+  return server;
+}
+
+if (require.main === module) {
+  let config;
+  try { config = readConfig(); }
+  catch (error) { console.error(`[config] ${error.message}`); process.exit(1); }
+  require('./lib/log').install();
+  const server = createProxyServer(config);
+  server.on('error', error => { console.error(`[server] ${error.message}`); process.exitCode = 1; });
+  server.listen(config.port, config.host, () => {
+    console.log(`[server] listening on ${config.host}:${config.port}`);
+    if (config.development) console.warn('[server] INSECURE development mode: loopback only');
+    metrics.start();
+    if (config.adminEnabled) admin.start({ closeConn: server.closeConn, config });
+  });
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await Promise.all([server.shutdown(), admin.stop()]);
+    metrics.stop();
+    require('./lib/log').flush();
+    require('./db').close();
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+}
+
+module.exports = { createProxyServer, parseTarget, prepareHttp };

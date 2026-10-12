@@ -22,9 +22,9 @@ const log = require('./lib/log');
 // ---------- .env 加载（统一走 lib/env，server.js 已最先加载，此处幂等） ----------
 require('./lib/env').load();
 
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
-const ADMIN_PORT = parseInt(process.env.ADMIN_PORT || '9090', 10);
-const ADMIN_HOST = process.env.ADMIN_HOST || '0.0.0.0';
+let ADMIN_PASSWORD;
+let ADMIN_PORT;
+let ADMIN_HOST;
 const TOKEN_TTL_MS = 24 * 3600 * 1000;
 const LOGIN_MAX_PER_MIN = 10;
 
@@ -36,21 +36,38 @@ const loginAttempts = new Map();     // ip -> { windowStart, count }
 
 let opts = { closeConn: null };
 let server = null;
-let statusTimer = null;
+let cleanupTimer = null;
+const streams = new Set();
 
 // ---------- 基础 helpers ----------
 function json(res, code, obj) {
+  if (res.destroyed || res.writableEnded) return;
   const body = JSON.stringify(obj);
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY' });
   res.end(body);
 }
 
 function readBody(req) {
-  return new Promise((resolve) => {
-    let data = '';
-    req.on('data', (d) => { data += d; if (data.length > 1e6) req.destroy(); });
-    req.on('end', () => resolve(data));
-    req.on('error', () => resolve(''));
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let bytes = 0;
+    let settled = false;
+    const fail = (code) => {
+      if (settled) return;
+      settled = true;
+      const error = new Error('invalid request body');
+      error.statusCode = code;
+      reject(error);
+    };
+    req.on('data', (d) => {
+      bytes += d.length;
+      if (bytes > 8192) { fail(413); return; }
+      if (!settled) chunks.push(d);
+    });
+    req.on('end', () => { if (!settled) { settled = true; resolve(Buffer.concat(chunks).toString('utf8')); } });
+    req.on('error', () => fail(400));
+    req.on('aborted', () => fail(400));
   });
 }
 
@@ -65,6 +82,10 @@ function isAuthed(req) {
 }
 
 function checkLoginRate(ip) {
+  if (!loginAttempts.has(ip) && loginAttempts.size >= 10000) {
+    prune();
+    if (loginAttempts.size >= 10000) return false;
+  }
   const now = Date.now();
   const rec = loginAttempts.get(ip);
   if (!rec || now - rec.windowStart > 60000) {
@@ -80,7 +101,8 @@ function apiStatus() {
   const s = metrics.snapshot();
   let todayConns = 0;
   try {
-    todayConns = db.get().prepare('SELECT COUNT(*) c FROM connections WHERE started_at >= ?').get(s.dayStart).c;
+    todayConns = db.get().prepare('SELECT COUNT(*) c FROM connections WHERE started_at >= ?').get(s.dayStart).c
+      + metrics.activeList().filter(c => c.startedAt >= s.dayStart).length;
   } catch (_) {}
   return {
     ...s,
@@ -129,13 +151,14 @@ function apiHistory(q) {
 }
 
 function apiConfig() {
+  const config = opts.config;
   const pwdSet = ADMIN_PASSWORD !== 'admin';
   return {
     forward: {
-      port: parseInt(process.env.PORT || '8443', 10),
-      host: process.env.HOST || '0.0.0.0',
-      idleTimeoutSec: parseInt(process.env.IDLE_TIMEOUT || '0', 10),
-      tokenSet: !!(process.env.PROXY_TOKEN && process.env.PROXY_TOKEN !== 'z-proxy-dev'),
+      port: config.port,
+      host: config.host,
+      idleTimeoutSec: config.idleTimeoutMs / 1000,
+      tokenSet: !!(config.secret && config.secret !== 'z-proxy-dev'),
     },
     admin: {
       port: ADMIN_PORT,
@@ -149,12 +172,12 @@ function apiConfig() {
 }
 
 // ---------- 路由 ----------
-function onRequest(req, res) {
+async function onRequest(req, res) {
   let url;
   try { url = new URL(req.url, 'http://x'); } catch (_) { json(res, 400, { error: 'Bad Request' }); return; }
   const p = url.pathname;
 
-  if (p === '/api/login') return handleLogin(req, res, url);
+  if (p === '/api/login') return await handleLogin(req, res, url);
   if (p === '/api/stream') return handleStream(req, res, url);
   if (p.startsWith('/api/')) return handleApi(req, res, p, url);
   return serveStatic(req, res, p);
@@ -165,12 +188,18 @@ async function handleLogin(req, res, url) {
   if (!checkLoginRate(ip)) { json(res, 429, { error: 'Too many attempts' }); return; }
   if (req.method !== 'POST') { json(res, 405, { error: 'Method Not Allowed' }); return; }
   let body = {};
-  try { body = JSON.parse(await readBody(req) || '{}'); } catch (_) { json(res, 400, { error: 'Bad JSON' }); return; }
+  try { body = JSON.parse(await readBody(req) || '{}'); }
+  catch (error) { json(res, error.statusCode || 400, { error: 'Bad JSON or oversized body' }); return; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    json(res, 400, { error: 'Expected a JSON object' }); return;
+  }
   const pwd = typeof body.password === 'string' ? body.password : '';
   const a = Buffer.from(pwd);
   const b = Buffer.from(ADMIN_PASSWORD);
   const ok = a.length === b.length && crypto.timingSafeEqual(a, b);
   if (!ok) { json(res, 401, { error: 'Wrong password' }); return; }
+  prune();
+  if (tokens.size >= 1024) { json(res, 503, { error: 'Session limit reached' }); return; }
   const token = crypto.randomBytes(32).toString('hex');
   tokens.set(token, Date.now() + TOKEN_TTL_MS);
   json(res, 200, { token, expiresIn: TOKEN_TTL_MS / 1000 });
@@ -178,6 +207,11 @@ async function handleLogin(req, res, url) {
 
 function handleApi(req, res, p, url) {
   if (!isAuthed(req)) { json(res, 401, { error: 'Unauthorized' }); return; }
+  if (req.method === 'POST' && p === '/api/logout') {
+    tokens.delete(req.headers.authorization.slice(7));
+    for (const stream of streams) if (!tokens.has(stream.token)) stream.close();
+    return json(res, 200, { ok: true });
+  }
   if (req.method === 'GET' && p === '/api/status') return json(res, 200, apiStatus());
   if (req.method === 'GET' && p === '/api/connections') return json(res, 200, { connections: metrics.activeList() });
   if (req.method === 'GET' && p === '/api/connections/history') return json(res, 200, { connections: apiHistory(url.searchParams) });
@@ -196,7 +230,7 @@ function handleApi(req, res, p, url) {
 }
 
 function handleLogs(req, res, url) {
-  const limit = parseInt(url.searchParams.get('limit') || '200', 10) || 200;
+  const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '200', 10) || 200, 2000));
   const level = url.searchParams.get('level');
   const afterId = parseInt(url.searchParams.get('afterId') || '0', 10) || 0;
   let rows;
@@ -225,29 +259,54 @@ function handleStream(req, res, url) {
     res.end('Unauthorized');
     return;
   }
+  if (streams.size >= 32) { json(res, 503, { error: 'Stream limit reached' }); return; }
+  req.socket.setTimeout(0); // SSE has its own heartbeat and lifetime checks.
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-store',
     'Connection': 'keep-alive',
   });
   const send = (event, data) => {
-    try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch (_) {}
+    if (res.destroyed || res.writableEnded) return;
+    if (!tokens.has(token) || tokens.get(token) <= Date.now()) { stream.close(); return; }
+    try {
+      // Disconnect slow consumers rather than buffering an unbounded queue.
+      if (!res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)) res.destroy();
+    } catch (_) { res.destroy(); }
   };
 
   const pushStatus = () => send('status', apiStatus());
   const onConn = (d) => send('conn', d);
   const onLog = (d) => send('log', d);
-  const heartbeat = setInterval(() => { try { res.write(': ping\n\n'); } catch (_) {} }, 30000);
+  const heartbeat = setInterval(() => {
+    if (res.destroyed || res.writableEnded) return;
+    if (!tokens.has(token) || tokens.get(token) <= Date.now()) { stream.close(); return; }
+    try { if (!res.write(': ping\n\n')) res.destroy(); }
+    catch (_) { res.destroy(); }
+  }, 30000);
   const timer = setInterval(pushStatus, 5000);
-
-  metrics.bus.on('conn', onConn);
-  log.bus.on('log', onLog);
-  res.on('close', () => {
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    streams.delete(stream);
     clearInterval(timer);
     clearInterval(heartbeat);
     metrics.bus.removeListener('conn', onConn);
     log.bus.removeListener('log', onLog);
-  });
+  };
+  const stream = { res, token, close() {
+    release();
+    res.end();
+    const linger = setTimeout(() => res.destroy(), 1000);
+    linger.unref();
+    res.once('close', () => clearTimeout(linger));
+  } };
+  streams.add(stream);
+
+  metrics.bus.on('conn', onConn);
+  log.bus.on('log', onLog);
+  res.on('close', release);
   pushStatus();
 }
 
@@ -271,7 +330,8 @@ function serveStatic(req, res, pathname) {
   if (!fs.existsSync(DIST_DIR)) { json(res, 404, { error: 'frontend not built (run: cd web-admin && npm run build)' }); return; }
   let rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   let file = path.normalize(path.join(DIST_DIR, rel));
-  if (!file.startsWith(DIST_DIR)) { json(res, 403, { error: 'Forbidden' }); return; }
+  const relative = path.relative(DIST_DIR, file);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) { json(res, 403, { error: 'Forbidden' }); return; }
   if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
     file = path.join(DIST_DIR, 'index.html'); // SPA history 回退
     if (!fs.existsSync(file)) { json(res, 404, { error: 'Not Found' }); return; }
@@ -283,18 +343,62 @@ function serveStatic(req, res, pathname) {
     'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=3600',
   });
   if (req.method === 'HEAD') { res.end(); return; }
-  fs.createReadStream(file).pipe(res);
+  const input = fs.createReadStream(file);
+  input.on('error', () => res.destroy());
+  input.pipe(res);
 }
 
 // ---------- 启动 ----------
 function start(_opts) {
   if (_opts) opts = { ...opts, ..._opts };
   if (server) return server;
-  server = http.createServer(onRequest);
+  const config = opts.config || require('./lib/config').readConfig();
+  opts.config = config;
+  ADMIN_PASSWORD = config.adminPassword;
+  ADMIN_PORT = config.adminPort;
+  ADMIN_HOST = config.adminHost;
+  server = http.createServer((req, res) => {
+    Promise.resolve(onRequest(req, res)).catch(() => {
+      if (res.headersSent) res.destroy();
+      else json(res, 500, { error: 'Internal Server Error' });
+    });
+  });
+  server.requestTimeout = 15000;
+  server.headersTimeout = 10000;
+  server.setTimeout(30000, socket => socket.destroy());
+  server.on('error', (error) => {
+    // Management failures must not terminate forwarding.
+    console.error(`[admin] unavailable: ${error.message}`);
+  });
+  cleanupTimer = setInterval(prune, 60000);
+  cleanupTimer.unref();
   server.listen(ADMIN_PORT, ADMIN_HOST, () => {
     console.log(`[admin] web admin listening on ${ADMIN_HOST}:${ADMIN_PORT} (password=${ADMIN_PASSWORD === 'admin' ? 'DEFAULT-CHANGE-ME' : 'set'})`);
   });
   return server;
 }
 
-module.exports = { start };
+function prune() {
+  const now = Date.now();
+  for (const [token, expiry] of tokens) if (expiry <= now) tokens.delete(token);
+  for (const [ip, rec] of loginAttempts) if (now - rec.windowStart > 60000) loginAttempts.delete(ip);
+  for (const stream of streams) if (!tokens.has(stream.token)) stream.close();
+}
+
+async function stop() {
+  if (cleanupTimer) clearInterval(cleanupTimer);
+  cleanupTimer = null;
+  for (const stream of streams) stream.res.destroy();
+  streams.clear();
+  tokens.clear();
+  loginAttempts.clear();
+  if (!server) return;
+  const current = server;
+  server = null;
+  await new Promise(resolve => {
+    current.close(resolve);
+    if (current.closeAllConnections) current.closeAllConnections();
+  });
+}
+
+module.exports = { start, stop };

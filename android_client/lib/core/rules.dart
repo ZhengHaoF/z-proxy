@@ -128,7 +128,7 @@ bool useServer(
   if (mode == 'all') {
     return !isBypass(host, bypass ?? defaultBypass);
   }
-  return domainMatches(host, rules);
+  return !isBypass(host, bypass ?? defaultBypass) && domainMatches(host, rules);
 }
 
 List<int>? _parseIpv4(String host) {

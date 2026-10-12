@@ -69,8 +69,8 @@ class _RulesPageState extends State<RulesPage> {
           padding: const EdgeInsets.all(16),
           child: Text(
             services.config.mode == 'all'
-                ? '当前为"代理全部流量"模式:所有流量(除白名单)都走隧道,规则列表不生效。'
-                : '当前为"按规则匹配"模式:仅以下域名走加密隧道,其余直连。',
+                ? '当前为"全部 TCP 代理"模式:除白名单外 TCP 走服务端。DNS 直连，其他 UDP 不支持。'
+                : '当前为"按规则匹配"模式:仅匹配目标域名走服务端。TUN 目标若已是 IP，域名规则可能不生效。',
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ),

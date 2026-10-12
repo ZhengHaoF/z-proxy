@@ -84,6 +84,17 @@ void main() {
   });
 
   group('useServer', () {
+    test('bypass wins over matched rules', () {
+      expect(
+        useServer('example.com', rules: const ['example.com'],
+            mode: 'matched', bypass: const ['example.com']),
+        isFalse,
+      );
+      expect(
+        useServer('127.0.0.1', rules: const ['127.0.0.1'], mode: 'matched'),
+        isFalse,
+      );
+    });
     test('matched mode: only rule hits go to server', () {
       expect(useServer('example.com', rules: const ['example.com'], mode: 'matched'), isTrue);
       expect(useServer('www.example.com', rules: const ['example.com'], mode: 'matched'), isTrue);

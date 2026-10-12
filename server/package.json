@@ -4,7 +4,8 @@
   "description": "Node.js 22 forward-proxy server: receives CONNECT/HTTP from the client, resolves DNS server-side, and TCP-forwards to the real target.",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
   },
   "engines": {
     "node": ">=18"

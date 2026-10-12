@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { apiLogin } from '../api/client'
+import { apiLogin, client } from '../api/client'
 
 const TOKEN_KEY = 'admin_token'
 
@@ -14,8 +14,15 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function logout() {
+    const previous = token.value
     token.value = null
     localStorage.removeItem(TOKEN_KEY)
+    // Revoke server-side session too; local logout must still succeed offline.
+    if (previous) {
+      void client.post('/logout', {}, {
+        headers: { Authorization: `Bearer ${previous}` },
+      }).catch(() => {})
+    }
   }
 
   return { token, login, logout }

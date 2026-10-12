@@ -38,6 +38,7 @@ function scheduleFlush() {
 }
 
 function flush() {
+  if (timer) clearTimeout(timer);
   timer = null;
   if (!buffer.length) return;
   const rows = buffer.splice(0);
@@ -69,7 +70,8 @@ function getRecent(limit = 200, level) {
   try {
     const d = db.get();
     const lv = level ? d.prepare('SELECT * FROM logs WHERE level = ? ORDER BY id DESC LIMIT ?') : d.prepare('SELECT * FROM logs ORDER BY id DESC LIMIT ?');
-    const rows = lv.all(level || limit, level ? limit : undefined).map((r) => ({ id: r.id, ts: r.ts, level: r.level, msg: r.msg }));
+    const records = level ? lv.all(level, limit) : lv.all(limit);
+    const rows = records.map((r) => ({ id: r.id, ts: r.ts, level: r.level, msg: r.msg }));
     if (level) rows.splice(limit);
     return rows.reverse();
   } catch (_) {

@@ -29,7 +29,13 @@ Future<ProbeResult> probe({
   final key = keyFor(token);
   late Socket socket;
   try {
-    socket = await Socket.connect(serverHost, serverPort);
+    socket = await Socket.connect(serverHost, serverPort, timeout: timeout);
+  } on TimeoutException {
+    return (
+      code: 'timeout',
+      ok: false,
+      msg: '连接服务端 $serverHost:$serverPort 超时',
+    );
   } catch (e) {
     return (
       code: 'unreachable',
