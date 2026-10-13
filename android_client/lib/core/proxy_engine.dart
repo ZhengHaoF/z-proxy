@@ -104,6 +104,7 @@ class ProxyEngine {
     }
     final socks = _socksServer;
     _socksServer = null;
+    _socksPort = 0;
     if (socks != null) {
       await socks.close();
     }
@@ -215,7 +216,7 @@ class ProxyEngine {
   // (excluded from the VPN), so DNS and other UDP traffic reaches the
   // physical network — this is what makes system DNS work behind the tunnel.
   Future<void> _startUdpRelay(Socket client, StreamIterator<List<int>> it) async {
-    final relay = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+    final relay = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
     final sessions = <String, _UdpSession>{};
     final cleanup = Timer.periodic(const Duration(minutes: 1), (_) {
       final now = DateTime.now();
@@ -420,7 +421,7 @@ class ProxyEngine {
   }) async {
     late Socket upstream;
     try {
-      upstream = await Socket.connect(serverHost, serverPort);
+      upstream = await Socket.connect(serverHost, serverPort, timeout: timeout);
       developer.log(
         'upstream connected $serverHost:$serverPort target=$host:$port',
         name: 'ZProxyProxy',
@@ -435,9 +436,11 @@ class ProxyEngine {
     }
     final ackIt = StreamIterator(upstream);
     var established = false;
+    Uint8List upstreamRest = Uint8List(0);
     try {
+      final authority = host.contains(':') ? '[$host]:$port' : '$host:$port';
       upstream.add(encryptFrame(
-          utf8.encode(jsonEncode({'m': 'CONNECT', 't': '$host:$port'})), _key));
+          utf8.encode(jsonEncode({'m': 'CONNECT', 't': authority})), _key));
       if (rest.isNotEmpty) {
         upstream.add(rest);
       }
@@ -460,6 +463,7 @@ class ProxyEngine {
         name: 'ZProxyProxy',
       );
       established = true;
+      upstreamRest = ackData.rest;
     } catch (_) {
       return;
     } finally {
@@ -472,6 +476,10 @@ class ProxyEngine {
       }
     }
     await onEstablished(client);
+    if (upstreamRest.isNotEmpty) {
+      client.add(upstreamRest);
+      await client.flush();
+    }
     await _pipe(client, clientIt, upstream, ackIt);
   }
 
@@ -488,7 +496,7 @@ class ProxyEngine {
   }) async {
     late Socket target;
     try {
-      target = await Socket.connect(host, port);
+      target = await Socket.connect(host, port, timeout: timeout);
     } catch (_) {
       await onDown(client);
       return;
@@ -518,7 +526,7 @@ class ProxyEngine {
   ) async {
     late Socket upstream;
     try {
-      upstream = await Socket.connect(serverHost, serverPort);
+      upstream = await Socket.connect(serverHost, serverPort, timeout: timeout);
     } catch (_) {
       _closeQuietly(client);
       return;
@@ -565,7 +573,7 @@ class ProxyEngine {
     final port = u.hasPort ? u.port : 80;
     late Socket target;
     try {
-      target = await Socket.connect(host, port);
+      target = await Socket.connect(host, port, timeout: timeout);
     } catch (_) {
       _closeQuietly(client);
       return;
@@ -683,8 +691,14 @@ class ProxyEngine {
     if (i < 0) {
       return ('', 443);
     }
-    final host = target.substring(0, i);
-    final port = int.tryParse(target.substring(i + 1)) ?? 443;
+    var host = target.substring(0, i);
+    if (host.startsWith('[') && host.endsWith(']')) {
+      host = host.substring(1, host.length - 1);
+    }
+    final port = int.tryParse(target.substring(i + 1));
+    if (host.isEmpty || port == null || port < 1 || port > 65535) {
+      throw const FormatException('Invalid CONNECT target');
+    }
     return (host, port);
   }
 }

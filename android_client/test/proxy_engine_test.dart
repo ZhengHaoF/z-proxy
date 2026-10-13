@@ -114,6 +114,48 @@ Future<List<int>> _readUpTo(StreamIterator<List<int>> it, int target) async {
 
 void main() {
   group('CONNECT', () {
+    test('ACK and upstream greeting in one write preserves trailing payload', () async {
+      final upstream = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      upstream.listen((socket) {
+        unawaited(() async {
+          final input = StreamIterator(socket);
+          try {
+            await readFrame(input, _key);
+            socket.add([
+              ...encryptFrame(utf8.encode(jsonEncode({'c': 200})), _key),
+              ...utf8.encode('upstream-greeting'),
+            ]);
+            await socket.flush();
+            await socket.close();
+          } finally {
+            await input.cancel();
+            socket.destroy();
+          }
+        }());
+      });
+      final engine = ProxyEngine(
+        serverHost: '127.0.0.1', serverPort: upstream.port,
+        token: _token, rules: ['example.com'], mode: 'matched',
+      );
+      final port = await engine.serve();
+      final client = await Socket.connect(InternetAddress.loopbackIPv4, port);
+      final input = StreamIterator(client);
+      try {
+        client.add(utf8.encode('CONNECT example.com:443 HTTP/1.1\r\n\r\n'));
+        await client.flush();
+        final bytes = <int>[];
+        while (await input.moveNext().timeout(const Duration(seconds: 3))) {
+          bytes.addAll(input.current);
+        }
+        expect(latin1.decode(bytes),
+            'HTTP/1.1 200 Connection Established\r\n\r\nupstream-greeting');
+      } finally {
+        await input.cancel();
+        client.destroy();
+        await engine.close();
+        await upstream.close();
+      }
+    });
     test('matched rule -> encrypted tunnel: 200, echo roundtrip, mock asserts frame', () async {
       final frames = <Map<String, dynamic>>[];
       final upstream = await _startMockUpstream(frames, ack: {'c': 200});

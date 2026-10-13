@@ -85,12 +85,12 @@ onBeforeUnmount(() => {
       </n-gi>
       <n-gi span="2 s:1">
         <n-card size="small">
-          <n-statistic label="累计转发流量" :value="totalBytes" />
+          <n-statistic label="本次进程转发流量" :value="totalBytes" />
         </n-card>
       </n-gi>
       <n-gi span="2 s:1">
         <n-card size="small">
-          <n-statistic label="今日流量" :value="todayBytes" />
+          <n-statistic label="本次进程今日流量" :value="todayBytes" />
           <template #footer>
             <n-text depth="3" style="font-size: 12px">今日连接 {{ status?.todayConns ?? 0 }} · 拒绝 {{ deniedTotal }}</n-text>
           </template>

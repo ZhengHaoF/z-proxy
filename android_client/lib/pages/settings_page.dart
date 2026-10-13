@@ -121,7 +121,7 @@ class _SettingsPageState extends State<SettingsPage> {
               SegmentedButton<String>(
                 segments: const [
                   ButtonSegment(value: 'matched', label: Text('按规则匹配')),
-                  ButtonSegment(value: 'all', label: Text('代理全部流量')),
+                  ButtonSegment(value: 'all', label: Text('全部 TCP 代理')),
                 ],
                 selected: {_mode},
                 onSelectionChanged: (v) => setState(() => _mode = v.first),
@@ -130,7 +130,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 controller: _bypass,
                 decoration: const InputDecoration(
                   labelText: '直连白名单',
-                  helperText: '逗号分隔;仅"代理全部流量"模式生效',
+                  helperText: '逗号分隔;所有模式优先直连。DNS 直连，其他 UDP 不支持',
                 ),
               ),
               TextFormField(

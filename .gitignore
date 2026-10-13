@@ -17,6 +17,8 @@ server/*.log
 
 # 客户端真实配置（含转发 token，勿提交）；模板见 client/config.example.json
 client/config.json
+client/sysproxy_backup.json
+client/sysproxy_backup.json.tmp
 
 # 服务端部署打包产物（部署前重新构建手动打包）
 server/server.zip

@@ -85,6 +85,7 @@ class VpnService : SystemVpnService() {
 
     /** Consecutive watchdog failures; guarded by the main handler. */
     private var engineFailures = 0
+    private var watchdog: Runnable? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var networkWatch: NetworkObserveModule
@@ -169,7 +170,7 @@ class VpnService : SystemVpnService() {
                 val fd = establishTun()
                 if (fd == null) {
                     Log.e(TAG, "VPN establishment was rejected by the system")
-                    postTunFailure("establish rejected")
+                    postTunFailure("establish rejected", gen)
                     return@Thread
                 }
                 if (gen != generation) {
@@ -198,7 +199,7 @@ class VpnService : SystemVpnService() {
                 if (!started) {
                     fd.close()
                     tunFd = null
-                    postTunFailure("engine start failed")
+                    postTunFailure("engine start failed", gen)
                     return@Thread
                 }
                 // The engine now owns the tun fd: detach the Java handle so
@@ -208,23 +209,27 @@ class VpnService : SystemVpnService() {
                 isRunning = true
                 starting = false
                 runOnMain {
+                    if (gen != generation || !isRunning) return@runOnMain
                     startForeground(connecting = false)
                     Log.i(TAG, "vpn running")
                     stateListener?.invoke(true)
-                    scheduleEngineWatchdog()
+                    engineFailures = 0
+                    scheduleEngineWatchdog(gen)
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "startTun failed", t)
-                postTunFailure("exception: ${t.message}")
+                postTunFailure("exception: ${t.message}", gen)
             }
         }.apply { name = "vpn-tun"; start() }
     }
 
-    private fun postTunFailure(reason: String) {
+    private fun postTunFailure(reason: String, gen: Int) {
+        if (gen != generation) return
         starting = false
         isRunning = false
         Log.e(TAG, "tunnel failed: $reason")
         runOnMain {
+            if (gen != generation) return@runOnMain
             stopForeground(true)
             stateListener?.invoke(false)
             stopSelf()
@@ -238,8 +243,12 @@ class VpnService : SystemVpnService() {
     /** Tears down tun2socks and the tun device; the service itself stays up. */
     fun stopTun() {
         generation++ // invalidate any in-flight startTun
+        watchdog?.let { mainHandler.removeCallbacks(it) }
+        watchdog = null
+        engineFailures = 0
         starting = false
         if (!isRunning && tunFd == null) {
+            stopForeground(true)
             return
         }
         isRunning = false
@@ -265,12 +274,16 @@ class VpnService : SystemVpnService() {
      * After [ENGINE_MAX_FAILURES] consecutive probes fail the tunnel is
      * torn down and the state change reported.
      */
-    private fun scheduleEngineWatchdog() {
-        mainHandler.postDelayed({ checkEngineAlive() }, WATCHDOG_INTERVAL_MS)
+    private fun scheduleEngineWatchdog(gen: Int) {
+        if (gen != generation || !isRunning) return
+        watchdog?.let { mainHandler.removeCallbacks(it) }
+        val next = Runnable { checkEngineAlive(gen) }
+        watchdog = next
+        mainHandler.postDelayed(next, WATCHDOG_INTERVAL_MS)
     }
 
-    private fun checkEngineAlive() {
-        if (!isRunning || socksPort <= 0) {
+    private fun checkEngineAlive(gen: Int) {
+        if (gen != generation || !isRunning || socksPort <= 0) {
             return
         }
         val port = socksPort
@@ -284,18 +297,18 @@ class VpnService : SystemVpnService() {
                 false
             }
             runOnMain {
-                if (!isRunning) {
+                if (gen != generation || !isRunning) {
                     return@runOnMain
                 }
                 if (alive) {
                     engineFailures = 0
-                    scheduleEngineWatchdog()
+                    scheduleEngineWatchdog(gen)
                     return@runOnMain
                 }
                 engineFailures++
                 Log.w(TAG, "watchdog: socks port $port unreachable (failures=$engineFailures)")
                 if (engineFailures < ENGINE_MAX_FAILURES) {
-                    scheduleEngineWatchdog()
+                    scheduleEngineWatchdog(gen)
                     return@runOnMain
                 }
                 Log.e(TAG, "watchdog: engine dead, stopping tunnel")

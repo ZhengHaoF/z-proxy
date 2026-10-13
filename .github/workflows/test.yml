@@ -1,0 +1,52 @@
+name: Regression tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - run: npm test
+        working-directory: server
+      - run: npm ci && npm run build
+        working-directory: server/web-admin
+  desktop:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: xvfb-run -a python -W error::ResourceWarning -m unittest discover -s client/tests -v
+  android-core:
+    runs-on: ubuntu-latest
+    env:
+      PUB_HOSTED_URL: https://pub.flutter-io.cn
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.7'
+          cache: true
+      - run: flutter pub get --enforce-lockfile
+        working-directory: android_client
+      - run: flutter test --no-pub
+        working-directory: android_client
+      - run: flutter analyze --no-pub
+        working-directory: android_client

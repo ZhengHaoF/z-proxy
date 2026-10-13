@@ -19,7 +19,7 @@ const CLEANUP_INTERVAL = 120; // 每 120 次采样（1h）做一次 DB 容量清
 
 const state = {
   startedAt: Date.now(),
-  totalConns: 0,          // 累计连接（含拒绝）
+  totalConns: 0,          // 本次进程已鉴权连接（拒绝单独计入 denied）
   totalBytesUp: 0,
   totalBytesDown: 0,
   dayBytesUp: 0,
@@ -46,6 +46,9 @@ function rollDayIfNeeded() {
 }
 
 let timers = null;
+let lastSampleUp = 0;
+let lastSampleDown = 0;
+let lastSampleTs = 0;
 
 /** 启动采样与清理定时器（server.js 启动后调用一次） */
 function start() {
@@ -55,24 +58,28 @@ function start() {
 
 function onSample() {
   rollDayIfNeeded();
-  let upDelta = 0;
-  let downDelta = 0;
-  // 逐连接取当前累计，计算与上次采样之差（避免活跃连接重复计入）
-  for (const c of state.active.values()) {
-    upDelta += c.up - c._lastSampleUp;
-    downDelta += c.down - c._lastSampleDown;
-    c._lastSampleUp = c.up;
-    c._lastSampleDown = c.down;
-  }
+  // Global monotonic counters retain bytes even after a connection closes.
+  const upDelta = state.totalBytesUp - lastSampleUp;
+  const downDelta = state.totalBytesDown - lastSampleDown;
   const active = state.active.size;
   try {
+    const ts = Math.max(Date.now(), lastSampleTs + 1);
     db.get().prepare('INSERT OR REPLACE INTO samples (ts, bytes_up, bytes_down, active) VALUES (?, ?, ?, ?)')
-      .run(Date.now(), upDelta, downDelta, active);
+      .run(ts, upDelta, downDelta, active);
+    lastSampleTs = ts;
+    lastSampleUp = state.totalBytesUp;
+    lastSampleDown = state.totalBytesDown;
   } catch (_) {}
   state._sampleCount = (state._sampleCount || 0) + 1;
   if (state._sampleCount % CLEANUP_INTERVAL === 0) {
     try { db.cleanup(); } catch (_) {}
   }
+}
+
+function stop() {
+  if (timers) clearInterval(timers);
+  timers = null;
+  onSample();
 }
 
 /** 连接建立（验签通过后调用） */
@@ -180,4 +187,4 @@ function markClosing(id) {
   return true;
 }
 
-module.exports = { bus, start, connOpen, connUpgraded, connBytes, connClose, deny, snapshot, activeList, markClosing };
+module.exports = { bus, start, stop, onSample, connOpen, connUpgraded, connBytes, connClose, deny, snapshot, activeList, markClosing };
